@@ -24,34 +24,42 @@ video_processor = None
 
 @app.route('/api/auth/register', methods=['POST'])
 def register():
-    data = request.get_json()
-    hashed_pw = bcrypt.generate_password_hash(data.get('password')).decode('utf-8')
-    
-    if users_collection.find_one({'username': data.get('username')}):
-        return jsonify({'message': 'Username already exists'}), 400
+    try:
+        data = request.get_json()
+        hashed_pw = bcrypt.generate_password_hash(data.get('password')).decode('utf-8')
+        
+        if users_collection.find_one({'username': data.get('username')}):
+            return jsonify({'message': 'Username already exists'}), 400
 
-    new_user = {
-        'username': data.get('username'),
-        'password_hash': hashed_pw,
-        'role': data.get('role', 'Citizen')
-    }
-    users_collection.insert_one(new_user)
-    
-    return jsonify({'message': 'User created successfully'}), 201
+        new_user = {
+            'username': data.get('username'),
+            'password_hash': hashed_pw,
+            'role': data.get('role', 'Citizen')
+        }
+        users_collection.insert_one(new_user)
+        
+        return jsonify({'message': 'User created successfully'}), 201
+    except Exception as e:
+        print(f"Error in register: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/auth/login', methods=['POST'])
 def login():
-    data = request.get_json()
-    user = users_collection.find_one({'username': data.get('username')})
+    try:
+        data = request.get_json()
+        user = users_collection.find_one({'username': data.get('username')})
 
-    if user and bcrypt.check_password_hash(user['password_hash'], data.get('password')):
-        access_token = create_access_token(
-            identity=str(user['_id']), 
-            additional_claims={'role': user['role'], 'username': user['username']}
-        )
-        return jsonify({'token': access_token, 'role': user['role']}), 200
+        if user and bcrypt.check_password_hash(user['password_hash'], data.get('password')):
+            access_token = create_access_token(
+                identity=str(user['_id']), 
+                additional_claims={'role': user['role'], 'username': user['username']}
+            )
+            return jsonify({'token': access_token, 'role': user['role']}), 200
 
-    return jsonify({'message': 'Invalid credentials'}), 401
+        return jsonify({'message': 'Invalid credentials'}), 401
+    except Exception as e:
+        print(f"Error in login: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/complaints', methods=['POST'])
 @jwt_required()
