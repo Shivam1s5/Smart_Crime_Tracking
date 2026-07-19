@@ -1,17 +1,19 @@
 import numpy as np
 from sklearn.cluster import KMeans
-from models import Complaint, Incident, db
+from models import complaints_collection, incidents_collection
 
 def calculate_risk_zones(n_clusters=3):
     # Fetch all locations from complaints and incidents
-    complaints = Complaint.query.all()
-    incidents = Incident.query.all()
+    complaints = list(complaints_collection.find())
+    incidents = list(incidents_collection.find())
 
     points = []
     for c in complaints:
-        points.append([c.lat, c.lng])
+        if 'lat' in c and 'lng' in c:
+            points.append([c['lat'], c['lng']])
     for i in incidents:
-        points.append([i.lat, i.lng])
+        if 'lat' in i and 'lng' in i:
+            points.append([i['lat'], i['lng']])
     
     if len(points) < n_clusters:
         return []
