@@ -15,6 +15,7 @@ export default function PoliceDashboard() {
   
   // Geolocation and Add Camera State
   const [policeLocation, setPoliceLocation] = useState({ lat: null, lng: null });
+  const [policeAddress, setPoliceAddress] = useState('');
   const [showAddCameraModal, setShowAddCameraModal] = useState(false);
   const [newCameraData, setNewCameraData] = useState({ name: '', stream_url: '', location: '' });
 
@@ -22,11 +23,22 @@ export default function PoliceDashboard() {
     // Detect Police Location
     if ("geolocation" in navigator) {
       navigator.geolocation.getCurrentPosition(
-        (position) => {
-          setPoliceLocation({
-            lat: position.coords.latitude,
-            lng: position.coords.longitude
-          });
+        async (position) => {
+          const lat = position.coords.latitude;
+          const lng = position.coords.longitude;
+          setPoliceLocation({ lat, lng });
+
+          try {
+            const res = await axios.get(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}`);
+            if (res.data && res.data.display_name) {
+              const parts = res.data.display_name.split(',');
+              const shortAddress = parts.slice(0, 3).join(', ');
+              setPoliceAddress(shortAddress);
+            }
+          } catch (err) {
+            console.error("Reverse geocoding failed", err);
+            setPoliceAddress(`${lat.toFixed(4)}, ${lng.toFixed(4)}`);
+          }
         },
         (error) => {
           console.error("Error getting location: ", error);
@@ -192,9 +204,11 @@ export default function PoliceDashboard() {
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: 'rgba(255,255,255,0.05)', padding: '8px 16px', borderRadius: '20px' }}>
           <MapPin size={18} color={policeLocation.lat ? "var(--success)" : "var(--text-secondary)"} />
           <span style={{ fontSize: '0.9rem' }}>
-            {policeLocation.lat 
-              ? `GPS Locked: ${policeLocation.lat.toFixed(4)}, ${policeLocation.lng.toFixed(4)}` 
-              : 'Acquiring GPS Signal...'}
+            {policeAddress
+              ? `${policeAddress}`
+              : policeLocation.lat 
+                ? 'Acquiring Address...' 
+                : 'Acquiring GPS Signal...'}
           </span>
         </div>
 
