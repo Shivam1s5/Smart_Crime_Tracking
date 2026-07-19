@@ -20,31 +20,50 @@ cameras = [
 
 threat_types = ["Weapon Detected (Gun)", "Weapon Detected (Knife)", "Violent Altercation", "Unauthorized Intrusion"]
 
-def send_alert():
-    cam = random.choice(cameras)
-    threat = random.choice(threat_types)
-    confidence = round(random.uniform(0.75, 0.99), 2)
-    
-    payload = {
-        "camera_id": cam["id"],
-        "area": cam["area"],
-        "type": threat,
-        "confidence": confidence,
-        "image_url": "" # In a real scenario, this would be a URL to the S3 bucket where the frame is saved
-    }
-    
-    print(f"\n[!] THREAT DETECTED: {threat} at {cam['area']} ({cam['id']})")
-    print(f"    Confidence: {confidence * 100}%")
-    print("    Transmitting Red Alert to Command Center...")
-    
+# Placeholder for authentication
+def get_auth_token():
+    # In a real scenario, this would involve a login process
+    return "YOUR_ACCESS_TOKEN"
+
+def simulate_detection():
     try:
-        res = requests.post(f"{BACKEND_URL}/api/alerts/trigger", json=payload)
-        if res.status_code == 201:
-            print("    [SUCCESS] Alert transmitted and broadcasted.")
+        # Fetch actual cameras from the backend
+        token = get_auth_token()
+        if not token:
+            print("[AI-NODE] Skipping detection due to missing auth token.")
+            return
+
+        headers = {'Authorization': f'Bearer {token}'}
+        res = requests.get(f"{BACKEND_URL}/api/cameras", headers=headers)
+        if res.status_code != 200:
+            print("[AI-NODE] Failed to fetch cameras from backend.")
+            return
+
+        cameras = res.json()
+        if not cameras:
+            print("[AI-NODE] No active cameras found for monitoring.")
+            return
+
+        # Randomly select a camera that the user has added
+        camera = random.choice(cameras)
+        
+        crime_types = ["Weapon", "Assault", "Suspicious Activity", "Vandalism"]
+        alert = {
+            "type": random.choice(crime_types),
+            "camera_id": camera.get('name', camera.get('camera_id')),
+            "area": camera.get('area', 'Unknown Location'),
+            "confidence": round(random.uniform(0.7, 0.99), 2),
+            "timestamp": time.time() * 1000
+        }
+        
+        response = requests.post(f"{BACKEND_URL}/api/alerts/trigger", json=alert)
+        if response.status_code == 200:
+            print(f"[AI-NODE] Alert successfully triggered for {alert['area']} - {alert['camera_id']}")
         else:
-            print(f"    [FAILED] Server responded with code: {res.status_code}")
+            print(f"[AI-NODE] Failed to trigger alert: {response.text}")
+            
     except Exception as e:
-        print(f"    [ERROR] Could not connect to backend: {e}")
+        print(f"[AI-NODE] Error simulating detection: {e}")
 
 if __name__ == "__main__":
     print("\nScanning video feeds... (Press Ctrl+C to stop)")
@@ -54,7 +73,7 @@ if __name__ == "__main__":
             delay = random.randint(10, 30)
             print(f"Analyzing streams... Next anomaly check in {delay} seconds.")
             time.sleep(delay)
-            send_alert()
+            simulate_detection()
     except KeyboardInterrupt:
         print("\nShutting down AI Node.")
         sys.exit(0)

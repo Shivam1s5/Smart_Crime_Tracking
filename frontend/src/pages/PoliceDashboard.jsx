@@ -8,7 +8,6 @@ export default function PoliceDashboard() {
   const { logout } = useAuth();
   const [alerts, setAlerts] = useState([]);
   const [cameras, setCameras] = useState([]);
-  const [selectedArea, setSelectedArea] = useState('Indirapuram'); // Defaulting to the user's example
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -17,7 +16,7 @@ export default function PoliceDashboard() {
   // Geolocation and Add Camera State
   const [policeLocation, setPoliceLocation] = useState({ lat: null, lng: null });
   const [showAddCameraModal, setShowAddCameraModal] = useState(false);
-  const [newCameraData, setNewCameraData] = useState({ name: '', stream_url: '' });
+  const [newCameraData, setNewCameraData] = useState({ name: '', stream_url: '', location: '' });
 
   useEffect(() => {
     // Detect Police Location
@@ -52,11 +51,11 @@ export default function PoliceDashboard() {
     });
 
     return () => socket.disconnect();
-  }, [selectedArea]);
+  }, []);
 
   const fetchCameras = async () => {
     try {
-      const res = await axios.get(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/cameras?area=${selectedArea}`, {
+      const res = await axios.get(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/cameras`, {
         headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
       });
       setCameras(res.data);
@@ -84,7 +83,7 @@ export default function PoliceDashboard() {
       const payload = {
         name: newCameraData.name,
         stream_url: newCameraData.stream_url,
-        area: selectedArea,
+        area: newCameraData.location,
         lat: policeLocation.lat,
         lng: policeLocation.lng
       };
@@ -92,7 +91,7 @@ export default function PoliceDashboard() {
           headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
       });
       setShowAddCameraModal(false);
-      setNewCameraData({ name: '', stream_url: '' });
+      setNewCameraData({ name: '', stream_url: '', location: '' });
       fetchCameras(); // Refresh cameras
     } catch (err) {
       console.error("Failed to add camera", err);
@@ -160,6 +159,13 @@ export default function PoliceDashboard() {
                 />
               </div>
               <div>
+                <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem' }}>Location / Address (e.g. Indirapuram Mall Gate 1)</label>
+                <input 
+                  type="text" className="input-glass" required
+                  value={newCameraData.location} onChange={e => setNewCameraData({...newCameraData, location: e.target.value})}
+                />
+              </div>
+              <div>
                 <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem' }}>Live Stream URL (IP Webcam link)</label>
                 <input 
                   type="url" className="input-glass" required placeholder="http://192.168.x.x:8080/video"
@@ -210,17 +216,6 @@ export default function PoliceDashboard() {
                 <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <Video size={20} color="var(--accent)" /> Active Live Streams
                 </h3>
-                <select 
-                  className="input-glass" 
-                  style={{ width: 'auto', margin: 0, backgroundColor: 'rgba(15,23,42,0.9)', padding: '6px 12px' }}
-                  value={selectedArea}
-                  onChange={(e) => setSelectedArea(e.target.value)}
-                >
-                  <option value="Indirapuram">Indirapuram</option>
-                  <option value="Downtown">Downtown</option>
-                  <option value="North Side">North Side</option>
-                  <option value="West End">West End</option>
-                </select>
               </div>
               <button className="btn-primary" style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', gap: '6px' }} onClick={() => setShowAddCameraModal(true)}>
                 <Plus size={18} /> Add Real Camera
@@ -231,8 +226,8 @@ export default function PoliceDashboard() {
               {cameras.length === 0 ? (
                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', width: '100%', color: 'var(--text-secondary)' }}>
                    <Camera size={48} style={{ opacity: 0.2, marginBottom: '16px' }} />
-                   <p>No cameras deployed in {selectedArea}.</p>
-                   <p style={{ fontSize: '0.9rem' }}>Click "Add Real Camera" to link an IP stream.</p>
+                   <p>No active cameras found.</p>
+                   <p style={{ fontSize: '0.9rem' }}>Click "Add Real Camera" to deploy and link an IP stream.</p>
                  </div>
               ) : (
                 cameras.map((cam) => (
@@ -259,13 +254,13 @@ export default function PoliceDashboard() {
                       )}
                     </div>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                      <div>
+                      <div style={{ paddingRight: '8px' }}>
                         <strong style={{ display: 'block', fontSize: '1.05rem', color: 'var(--accent)' }}>{cam.name}</strong>
-                        <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>ID: {cam.camera_id}</span>
+                        <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{cam.area}</span>
                       </div>
                       {cam.lat && (
                         <div style={{ fontSize: '0.75rem', textAlign: 'right', color: 'var(--text-secondary)' }}>
-                          GPS: {parseFloat(cam.lat).toFixed(3)}, {parseFloat(cam.lng).toFixed(3)}
+                          {parseFloat(cam.lat).toFixed(4)}, {parseFloat(cam.lng).toFixed(4)}
                         </div>
                       )}
                     </div>
