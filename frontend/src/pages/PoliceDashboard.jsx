@@ -9,6 +9,7 @@ export default function PoliceDashboard() {
   const { logout } = useAuth();
   const [alerts, setAlerts] = useState([]);
   const [cameras, setCameras] = useState([]);
+  const [selectedArea, setSelectedArea] = useState('Downtown');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -18,7 +19,7 @@ export default function PoliceDashboard() {
     // Fetch Cameras for this area (Mocking 'Downtown' area for now)
     const fetchCameras = async () => {
       try {
-        const res = await axios.get(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/cameras?area=Downtown`, {
+        const res = await axios.get(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/cameras?area=${selectedArea}`, {
           headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
         });
         setCameras(res.data);
@@ -38,7 +39,7 @@ export default function PoliceDashboard() {
     });
 
     return () => socket.disconnect();
-  }, []);
+  }, [selectedArea]);
 
   const handleSearch = async (e) => {
     e.preventDefault();
@@ -112,19 +113,38 @@ export default function PoliceDashboard() {
           
           {/* Top Half: Cameras (New) */}
           <div className="glass-panel animate-fade-in" style={{ padding: '16px', display: 'flex', flexDirection: 'column' }}>
-            <h3 style={{ marginTop: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Video size={20} color="var(--accent)" /> Live Area Cameras (Downtown)
-            </h3>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Video size={20} color="var(--accent)" /> Live Area Cameras
+              </h3>
+              <select 
+                className="input-glass" 
+                style={{ width: 'auto', margin: 0, backgroundColor: 'rgba(15,23,42,0.9)' }}
+                value={selectedArea}
+                onChange={(e) => setSelectedArea(e.target.value)}
+              >
+                <option value="Downtown">Downtown</option>
+                <option value="North Side">North Side</option>
+                <option value="West End">West End</option>
+                <option value="South Central">South Central</option>
+              </select>
+            </div>
             <div style={{ display: 'flex', gap: '16px', overflowX: 'auto', paddingBottom: '8px' }}>
               {cameras.length === 0 ? (
                  <p style={{ color: 'var(--text-secondary)' }}>No cameras linked to this area.</p>
               ) : (
                 cameras.map((cam) => (
-                  <div key={cam._id} style={{ minWidth: '250px', background: 'rgba(255,255,255,0.05)', padding: '12px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)' }}>
-                    <div style={{ width: '100%', height: '140px', background: '#000', borderRadius: '4px', marginBottom: '8px', position: 'relative', overflow: 'hidden', display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-                      {/* Fake live stream UI */}
-                      <span style={{ position: 'absolute', top: 5, right: 5, background: 'red', color: 'white', fontSize: '0.7rem', padding: '2px 6px', borderRadius: '4px', fontWeight: 'bold' }}>LIVE</span>
-                      <Video size={40} color="rgba(255,255,255,0.2)" />
+                  <div key={cam._id} style={{ minWidth: '300px', background: 'rgba(255,255,255,0.05)', padding: '12px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)' }}>
+                    <div style={{ width: '100%', height: '170px', background: '#000', borderRadius: '4px', marginBottom: '8px', position: 'relative', overflow: 'hidden' }}>
+                      {/* Live Video Feed Simulation */}
+                      <span style={{ position: 'absolute', top: 8, right: 8, background: 'red', color: 'white', fontSize: '0.7rem', padding: '3px 8px', borderRadius: '4px', fontWeight: 'bold', zIndex: 10, animation: 'pulse 2s infinite' }}>LIVE</span>
+                      <iframe 
+                        src={`https://www.youtube.com/embed/1EiC9bvVGnk?autoplay=1&mute=1&controls=0&showinfo=0&loop=1&playlist=1EiC9bvVGnk`}
+                        title="Live Traffic Camera"
+                        frameBorder="0"
+                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                        style={{ width: '100%', height: '100%', pointerEvents: 'none' }}
+                      ></iframe>
                     </div>
                     <strong style={{ display: 'block', fontSize: '0.95rem' }}>{cam.name}</strong>
                     <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>ID: {cam.camera_id}</span>
