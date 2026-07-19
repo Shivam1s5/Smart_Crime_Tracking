@@ -3,54 +3,54 @@ from flask_cors import CORS
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity, get_jwt
 from flask_socketio import SocketIO
 from flask_bcrypt import Bcrypt
-from models import db, User, Complaint, CriminalRecord, Incident
+from models import users_collection, complaints_collection, criminal_records_collection, parse_json
 from ml_clustering import calculate_risk_zones
 from ml_video import VideoProcessor
+import os
+from dotenv import load_dotenv
+from datetime import datetime
+from bson.objectid import ObjectId
+
+load_dotenv()
 
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///crime_tracker.db'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['JWT_SECRET_KEY'] = 'super-secret-key-change-in-prod'
-
 CORS(app)
-db.init_app(app)
+
+app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'super-secret-key-change-in-prod')
 jwt = JWTManager(app)
-bcrypt = Bcrypt(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
+bcrypt = Bcrypt(app)
 
 video_processor = None
-
-with app.app_context():
-    db.create_all()
 
 @app.route('/api/auth/register', methods=['POST'])
 def register():
     data = request.get_json()
-    username = data.get('username')
-    password = data.get('password')
-    role = data.get('role', 'Citizen')
-
-    if User.query.filter_by(username=username).first():
+    hashed_pw = bcrypt.generate_password_hash(data.get('password')).decode('utf-8')
+    
+    if users_collection.find_one({'username': data.get('username')}):
         return jsonify({'message': 'Username already exists'}), 400
 
-    hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
-    new_user = User(username=username, password_hash=hashed_password, role=role)
-    db.session.add(new_user)
-    db.session.commit()
-
+    new_user = {
+        'username': data.get('username'),
+        'password_hash': hashed_pw,
+        'role': data.get('role', 'Citizen')
+    }
+    users_collection.insert_one(new_user)
+    
     return jsonify({'message': 'User created successfully'}), 201
 
 @app.route('/api/auth/login', methods=['POST'])
 def login():
     data = request.get_json()
-    user = User.query.filter_by(username=data.get('username')).first()
+    user = users_collection.find_one({'username': data.get('username')})
 
-    if user and bcrypt.check_password_hash(user.password_hash, data.get('password')):
+    if user and bcrypt.check_password_hash(user['password_hash'], data.get('password')):
         access_token = create_access_token(
-            identity=str(user.id), 
-            additional_claims={'role': user.role, 'username': user.username}
+            identity=str(user['_id']), 
+            additional_claims={'role': user['role'], 'username': user['username']}
         )
-        return jsonify({'token': access_token, 'role': user.role}), 200
+        return jsonify({'token': access_token, 'role': user['role']}), 200
 
     return jsonify({'message': 'Invalid credentials'}), 401
 
@@ -63,15 +63,16 @@ def add_complaint():
         return jsonify({'message': 'Only citizens can file complaints'}), 403
 
     data = request.get_json()
-    new_complaint = Complaint(
-        citizen_id=int(current_user_id),
-        description=data.get('description'),
-        location=data.get('location'),
-        lat=data.get('lat'),
-        lng=data.get('lng')
-    )
-    db.session.add(new_complaint)
-    db.session.commit()
+    new_complaint = {
+        'citizen_id': current_user_id,
+        'description': data.get('description'),
+        'location': data.get('location'),
+        'lat': data.get('lat'),
+        'lng': data.get('lng'),
+        'status': 'Pending',
+        'timestamp': datetime.utcnow()
+    }
+    complaints_collection.insert_one(new_complaint)
     return jsonify({'message': 'Complaint registered successfully'}), 201
 
 @app.route('/api/complaints', methods=['GET'])
@@ -79,21 +80,24 @@ def add_complaint():
 def get_complaints():
     current_user_id = get_jwt_identity()
     claims = get_jwt()
-    if claims.get('role') == 'Citizen':
-        complaints = Complaint.query.filter_by(citizen_id=int(current_user_id)).all()
-    else:
-        complaints = Complaint.query.all()
     
-    return jsonify([{
-        'id': c.id, 'description': c.description, 'location': c.location, 
-        'status': c.status, 'timestamp': c.timestamp.isoformat()
-    } for c in complaints]), 200
+    if claims.get('role') == 'Citizen':
+        complaints = list(complaints_collection.find({'citizen_id': current_user_id}))
+    else:
+        complaints = list(complaints_collection.find())
+    
+    # Format for JSON
+    for c in complaints:
+        c['_id'] = str(c['_id'])
+        c['timestamp'] = c['timestamp'].isoformat()
+    
+    return jsonify(complaints), 200
 
 @app.route('/api/zones', methods=['GET'])
 @jwt_required()
 def get_zones():
     claims = get_jwt()
-    if claims.get('role') != 'Police' and claims.get('role') != 'Admin':
+    if claims.get('role') not in ['Police', 'Admin']:
         return jsonify({'message': 'Unauthorized'}), 403
     
     zones = calculate_risk_zones(n_clusters=3)
@@ -103,15 +107,22 @@ def get_zones():
 @jwt_required()
 def search_records():
     claims = get_jwt()
-    if claims.get('role') != 'Police' and claims.get('role') != 'Admin':
+    if claims.get('role') not in ['Police', 'Admin']:
         return jsonify({'message': 'Unauthorized'}), 403
 
     query = request.args.get('q', '')
-    records = CriminalRecord.query.filter(CriminalRecord.name.contains(query) | CriminalRecord.alias.contains(query)).all()
-    return jsonify([{
-        'id': r.id, 'name': r.name, 'alias': r.alias, 'crimes': r.crimes,
-        'age': r.age, 'last_known_location': r.last_known_location
-    } for r in records]), 200
+    
+    records = list(criminal_records_collection.find({
+        '$or': [
+            {'name': {'$regex': query, '$options': 'i'}},
+            {'alias': {'$regex': query, '$options': 'i'}}
+        ]
+    }))
+    
+    for r in records:
+        r['_id'] = str(r['_id'])
+        
+    return jsonify(records), 200
 
 # WebSocket connections
 @socketio.on('connect')
@@ -126,7 +137,7 @@ def handle_disconnect():
 @jwt_required()
 def start_video():
     claims = get_jwt()
-    if claims.get('role') != 'Police' and claims.get('role') != 'Admin':
+    if claims.get('role') not in ['Police', 'Admin']:
         return jsonify({'message': 'Unauthorized'}), 403
         
     global video_processor

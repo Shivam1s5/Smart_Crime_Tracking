@@ -1,39 +1,24 @@
-from flask_sqlalchemy import SQLAlchemy
+from pymongo import MongoClient
+from bson.objectid import ObjectId
 from datetime import datetime
+import os
+from dotenv import load_dotenv
 
-db = SQLAlchemy()
+load_dotenv()
 
-class User(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(80), unique=True, nullable=False)
-    password_hash = db.Column(db.String(128), nullable=False)
-    role = db.Column(db.String(20), nullable=False) # 'Citizen', 'Police', 'Admin'
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+MONGO_URI = os.getenv('MONGO_URI')
+client = MongoClient(MONGO_URI)
+db = client['smart_crime_db']
 
-class Complaint(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    citizen_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    description = db.Column(db.Text, nullable=False)
-    location = db.Column(db.String(200), nullable=False)
-    lat = db.Column(db.Float, nullable=False)
-    lng = db.Column(db.Float, nullable=False)
-    status = db.Column(db.String(50), default='Pending') # Pending, Investigating, Resolved
-    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+# Collections
+users_collection = db['users']
+complaints_collection = db['complaints']
+criminal_records_collection = db['criminal_records']
+incidents_collection = db['incidents']
 
-class CriminalRecord(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), nullable=False)
-    alias = db.Column(db.String(100))
-    age = db.Column(db.Integer)
-    crimes = db.Column(db.Text, nullable=False)
-    last_known_location = db.Column(db.String(200))
-    photo_url = db.Column(db.String(500))
-
-class Incident(db.Model):
-    # Incidents detected by ML or verified by Police
-    id = db.Column(db.Integer, primary_key=True)
-    type = db.Column(db.String(50), nullable=False) # 'Violence', 'Theft', etc.
-    lat = db.Column(db.Float, nullable=False)
-    lng = db.Column(db.Float, nullable=False)
-    confidence = db.Column(db.Float)
-    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+# Helper functions for models can be added here if needed
+def parse_json(data):
+    """Helper to convert ObjectId to string for JSON serialization"""
+    import json
+    from bson import json_util
+    return json.loads(json_util.dumps(data))
