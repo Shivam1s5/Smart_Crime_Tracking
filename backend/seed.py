@@ -1,4 +1,4 @@
-from models import users_collection, criminal_records_collection, incidents_collection
+from models import users_collection, criminal_records_collection, incidents_collection, cameras_collection
 from flask_bcrypt import Bcrypt
 from flask import Flask
 
@@ -25,6 +25,15 @@ def seed_db():
         {'name': 'Jane Smith', 'alias': 'Viper', 'crimes': 'Cybercrime, Fraud', 'age': 28, 'last_known_location': 'North Side'}
     ]
     criminal_records_collection.insert_many(records)
+    
+    print("Seeding Cameras...")
+    cameras_collection.delete_many({})
+    cameras = [
+        {'camera_id': 'CAM-001', 'area': 'Downtown', 'name': 'Main Street Junction', 'status': 'Active', 'rtsp_url': 'http://158.58.130.148/mjpg/video.mjpg'},
+        {'camera_id': 'CAM-002', 'area': 'North Side', 'name': 'North Park Gate', 'status': 'Active', 'rtsp_url': 'http://158.58.130.148/mjpg/video.mjpg'},
+        {'camera_id': 'CAM-003', 'area': 'Downtown', 'name': 'City Hall Entrance', 'status': 'Active', 'rtsp_url': 'http://158.58.130.148/mjpg/video.mjpg'}
+    ]
+    cameras_collection.insert_many(cameras)
 
     print("Database seeded successfully with MongoDB!")
 

@@ -3,20 +3,37 @@ import axios from 'axios';
 import { io } from 'socket.io-client';
 import { useAuth } from '../context/AuthContext';
 import RiskMap from '../components/Map';
-import { ShieldAlert, LogOut, Video, Search, AlertTriangle } from 'lucide-react';
+import { ShieldAlert, LogOut, Video, Search, AlertTriangle, AlertOctagon, X } from 'lucide-react';
 
 export default function PoliceDashboard() {
   const { logout } = useAuth();
   const [alerts, setAlerts] = useState([]);
+  const [cameras, setCameras] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [redAlert, setRedAlert] = useState(null);
 
   useEffect(() => {
+    // Fetch Cameras for this area (Mocking 'Downtown' area for now)
+    const fetchCameras = async () => {
+      try {
+        const res = await axios.get(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/cameras?area=Downtown`, {
+          headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+        });
+        setCameras(res.data);
+      } catch (err) {
+        console.error(err);
+      }
+    };
+    fetchCameras();
+
     // Connect to WebSocket
-    const socket = io('http://localhost:5000');
+    const socketUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+    const socket = io(socketUrl);
     
-    socket.on('new_alert', (data) => {
+    socket.on('red_alert', (data) => {
+      setRedAlert(data);
       setAlerts((prev) => [data, ...prev]);
     });
 
@@ -27,7 +44,9 @@ export default function PoliceDashboard() {
     e.preventDefault();
     if (!searchQuery) return;
     try {
-      const res = await axios.get(`http://localhost:5000/api/records/search?q=${searchQuery}`);
+      const res = await axios.get(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/records/search?q=${searchQuery}`, {
+          headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+      });
       setSearchResults(res.data);
     } catch (err) {
       console.error(err);
@@ -37,8 +56,9 @@ export default function PoliceDashboard() {
   const startVideoProcessing = async () => {
     try {
       setIsProcessing(true);
-      await axios.post('http://localhost:5000/api/video/start');
-      // The backend will now stream alerts via websocket if a crime is detected
+      await axios.post(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/video/start`, {}, {
+          headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+      });
     } catch (err) {
       console.error(err);
       setIsProcessing(false);
@@ -46,8 +66,33 @@ export default function PoliceDashboard() {
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', padding: '16px', gap: '16px' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', padding: '16px', gap: '16px', position: 'relative' }}>
       
+      {/* RED ALERT OVERLAY */}
+      {redAlert && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, width: '100%', height: '100%',
+          background: 'rgba(220, 38, 38, 0.2)', backdropFilter: 'blur(10px)',
+          display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 9999,
+          animation: 'pulse 1s infinite'
+        }}>
+          <div className="glass-panel" style={{ background: 'rgba(0,0,0,0.8)', border: '2px solid red', padding: '40px', maxWidth: '600px', textAlign: 'center', position: 'relative' }}>
+            <button onClick={() => setRedAlert(null)} style={{ position: 'absolute', top: 10, right: 10, background: 'transparent', border: 'none', color: 'white', cursor: 'pointer' }}>
+              <X size={24} />
+            </button>
+            <AlertOctagon size={80} color="red" style={{ margin: '0 auto 20px auto' }} />
+            <h1 style={{ color: 'red', fontSize: '2.5rem', margin: '0 0 10px 0', textTransform: 'uppercase' }}>CRITICAL ALERT!</h1>
+            <h2 style={{ margin: '0 0 20px 0' }}>{redAlert.type} Detected in {redAlert.area}</h2>
+            <p style={{ fontSize: '1.2rem', color: '#ccc' }}>Confidence: <strong>{(redAlert.confidence * 100).toFixed(1)}%</strong></p>
+            <p style={{ fontSize: '1.1rem', color: '#ccc' }}>Camera: <strong>{redAlert.camera_id}</strong></p>
+            
+            <button className="btn-primary" onClick={() => setRedAlert(null)} style={{ marginTop: '30px', background: 'red', fontSize: '1.2rem', padding: '12px 30px' }}>
+              ACKNOWLEDGE
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Top Navbar */}
       <div className="glass-panel" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 24px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
@@ -62,21 +107,41 @@ export default function PoliceDashboard() {
       {/* Main Content Grid */}
       <div style={{ display: 'grid', gridTemplateColumns: '3fr 1fr', gap: '16px', flex: 1, overflow: 'hidden' }}>
         
-        {/* Left Column: Map & ML Controls */}
+        {/* Left Column: Map, Cameras & ML Controls */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', overflow: 'hidden' }}>
-          {/* Map */}
-          <div className="glass-panel animate-fade-in" style={{ flex: 1, padding: '8px' }}>
-            <RiskMap />
+          
+          {/* Top Half: Cameras (New) */}
+          <div className="glass-panel animate-fade-in" style={{ padding: '16px', display: 'flex', flexDirection: 'column' }}>
+            <h3 style={{ marginTop: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <Video size={20} color="var(--accent)" /> Live Area Cameras (Downtown)
+            </h3>
+            <div style={{ display: 'flex', gap: '16px', overflowX: 'auto', paddingBottom: '8px' }}>
+              {cameras.length === 0 ? (
+                 <p style={{ color: 'var(--text-secondary)' }}>No cameras linked to this area.</p>
+              ) : (
+                cameras.map((cam) => (
+                  <div key={cam._id} style={{ minWidth: '250px', background: 'rgba(255,255,255,0.05)', padding: '12px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)' }}>
+                    <div style={{ width: '100%', height: '140px', background: '#000', borderRadius: '4px', marginBottom: '8px', position: 'relative', overflow: 'hidden', display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+                      {/* Fake live stream UI */}
+                      <span style={{ position: 'absolute', top: 5, right: 5, background: 'red', color: 'white', fontSize: '0.7rem', padding: '2px 6px', borderRadius: '4px', fontWeight: 'bold' }}>LIVE</span>
+                      <Video size={40} color="rgba(255,255,255,0.2)" />
+                    </div>
+                    <strong style={{ display: 'block', fontSize: '0.95rem' }}>{cam.name}</strong>
+                    <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>ID: {cam.camera_id}</span>
+                  </div>
+                ))
+              )}
+            </div>
           </div>
 
-          {/* ML Controls & Search */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+          {/* Bottom Half: ML Controls & Search */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', flex: 1 }}>
             <div className="glass-panel" style={{ padding: '24px' }}>
               <h3 style={{ marginTop: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <Video size={20} color="var(--accent)" /> ML Camera Feed
+                <AlertTriangle size={20} color="var(--accent)" /> ML Surveillance Link
               </h3>
               <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '16px' }}>
-                Activate the CNN+LSTM Action Recognition pipeline.
+                Connect to the AI Microservice for real-time weapon and anomaly detection on connected cameras.
               </p>
               <button 
                 className="btn-primary" 
@@ -84,7 +149,7 @@ export default function PoliceDashboard() {
                 disabled={isProcessing}
                 style={{ background: isProcessing ? 'var(--success)' : 'var(--accent)' }}
               >
-                {isProcessing ? 'Engine Active & Monitoring...' : 'Start Real-Time Detection'}
+                {isProcessing ? 'Engine Linked & Monitoring...' : 'Link AI Detection Engine'}
               </button>
             </div>
 
@@ -106,7 +171,7 @@ export default function PoliceDashboard() {
               
               <div style={{ maxHeight: '100px', overflowY: 'auto' }}>
                 {searchResults.map(r => (
-                  <div key={r.id} style={{ fontSize: '0.9rem', padding: '8px', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
+                  <div key={r._id} style={{ fontSize: '0.9rem', padding: '8px', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
                     <strong>{r.name}</strong> ({r.alias}) - {r.crimes}
                   </div>
                 ))}
@@ -132,12 +197,13 @@ export default function PoliceDashboard() {
                       {new Date(alert.timestamp).toLocaleTimeString()}
                     </span>
                   </div>
-                  <p style={{ margin: '0 0 8px 0', fontSize: '0.9rem' }}>Location: {alert.location}</p>
+                  <p style={{ margin: '0 0 8px 0', fontSize: '0.9rem' }}>Area: {alert.area}</p>
+                  <p style={{ margin: '0 0 8px 0', fontSize: '0.9rem' }}>Cam: {alert.camera_id}</p>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <div style={{ height: '6px', background: 'rgba(255,255,255,0.2)', borderRadius: '3px', flex: 1 }}>
-                      <div style={{ height: '100%', background: 'var(--danger)', borderRadius: '3px', width: `${alert.confidence}%` }}></div>
+                      <div style={{ height: '100%', background: 'var(--danger)', borderRadius: '3px', width: `${alert.confidence * 100}%` }}></div>
                     </div>
-                    <span style={{ fontSize: '0.8rem', fontWeight: 'bold' }}>{alert.confidence}%</span>
+                    <span style={{ fontSize: '0.8rem', fontWeight: 'bold' }}>{(alert.confidence * 100).toFixed(1)}%</span>
                   </div>
                 </div>
               ))

@@ -8,6 +8,7 @@ export default function CitizenPortal() {
   const [complaints, setComplaints] = useState([]);
   const [description, setDescription] = useState('');
   const [location, setLocation] = useState('');
+  const [thana, setThana] = useState('');
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -16,7 +17,9 @@ export default function CitizenPortal() {
 
   const fetchComplaints = async () => {
     try {
-      const res = await axios.get('http://localhost:5000/api/complaints');
+      const res = await axios.get(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/complaints`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+      });
       setComplaints(res.data);
     } catch (err) {
       console.error(err);
@@ -27,14 +30,18 @@ export default function CitizenPortal() {
     e.preventDefault();
     setLoading(true);
     try {
-      await axios.post('http://localhost:5000/api/complaints', {
+      await axios.post(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/complaints`, {
         description,
         location,
+        area: thana,
         lat: 28.6 + Math.random() * 0.1, // Mock GPS coords based on location text in a real app
         lng: 77.2 + Math.random() * 0.1
+      }, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
       });
       setDescription('');
       setLocation('');
+      setThana('');
       fetchComplaints();
     } catch (err) {
       console.error(err);
@@ -63,6 +70,23 @@ export default function CitizenPortal() {
         <div className="glass-panel" style={{ padding: '32px', height: 'fit-content' }}>
           <h3 style={{ marginTop: 0, marginBottom: '24px' }}>Register Complaint</h3>
           <form onSubmit={handleSubmit}>
+            <div style={{ marginBottom: '16px' }}>
+              <label style={{ display: 'block', marginBottom: '8px', color: 'var(--text-secondary)' }}>Nearby Thana (Police Station)</label>
+              <select
+                className="input-glass"
+                value={thana}
+                onChange={(e) => setThana(e.target.value)}
+                required
+                style={{ width: '100%', padding: '12px', background: 'rgba(255,255,255,0.05)', color: 'white', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px' }}
+              >
+                <option value="" disabled style={{ color: 'black' }}>Select a Police Station...</option>
+                <option value="Downtown" style={{ color: 'black' }}>Downtown Police Station</option>
+                <option value="North Side" style={{ color: 'black' }}>North Side Police Station</option>
+                <option value="South Side" style={{ color: 'black' }}>South Side Police Station</option>
+                <option value="East Side" style={{ color: 'black' }}>East Side Police Station</option>
+                <option value="West Side" style={{ color: 'black' }}>West Side Police Station</option>
+              </select>
+            </div>
             <div style={{ marginBottom: '16px' }}>
               <label style={{ display: 'block', marginBottom: '8px', color: 'var(--text-secondary)' }}>Incident Location</label>
               <input
@@ -102,7 +126,7 @@ export default function CitizenPortal() {
               {complaints.map(c => (
                 <div key={c.id} style={{ padding: '16px', background: 'rgba(255,255,255,0.03)', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.05)' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '12px' }}>
-                    <span style={{ fontWeight: 600 }}>{c.location}</span>
+                    <span style={{ fontWeight: 600 }}>{c.location} ({c.area || 'N/A'})</span>
                     <span style={{ 
                       padding: '4px 12px', 
                       borderRadius: '16px', 

@@ -3,7 +3,7 @@ from flask_cors import CORS
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity, get_jwt
 from flask_socketio import SocketIO
 from flask_bcrypt import Bcrypt
-from models import users_collection, complaints_collection, criminal_records_collection, parse_json
+from models import users_collection, complaints_collection, criminal_records_collection, cameras_collection, alerts_collection, parse_json
 from ml_clustering import calculate_risk_zones
 import os
 from dotenv import load_dotenv
@@ -145,6 +145,51 @@ def start_video():
     #     video_processor = VideoProcessor(socketio, app, video_source=0) 
     # video_processor.start()
     return jsonify({"message": "Camera is currently disabled per user request"}), 200
+
+@app.route('/api/cameras', methods=['GET'])
+@jwt_required()
+def get_cameras():
+    claims = get_jwt()
+    if claims.get('role') not in ['Police', 'Admin']:
+        return jsonify({'message': 'Unauthorized'}), 403
+    
+    area = request.args.get('area')
+    query = {}
+    if area:
+        query['area'] = area
+        
+    cameras = list(cameras_collection.find(query))
+    for c in cameras:
+        c['_id'] = str(c['_id'])
+        
+    return jsonify(cameras), 200
+
+@app.route('/api/alerts/trigger', methods=['POST'])
+def trigger_alert():
+    # This endpoint is called by the AI Microservice
+    data = request.get_json()
+    
+    if not data or 'camera_id' not in data:
+        return jsonify({'error': 'Invalid payload'}), 400
+        
+    new_alert = {
+        'camera_id': data.get('camera_id'),
+        'area': data.get('area', 'Unknown'),
+        'type': data.get('type', 'Weapon Detected'),
+        'confidence': data.get('confidence', 0.0),
+        'image_url': data.get('image_url', ''),
+        'timestamp': datetime.utcnow()
+    }
+    
+    # Save to db
+    alerts_collection.insert_one(new_alert)
+    new_alert['_id'] = str(new_alert['_id'])
+    new_alert['timestamp'] = new_alert['timestamp'].isoformat()
+    
+    # Broadcast to police dashboards via WebSocket
+    socketio.emit('red_alert', new_alert)
+    
+    return jsonify({'message': 'Alert triggered successfully', 'alert': new_alert}), 201
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

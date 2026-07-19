@@ -15,6 +15,8 @@ users_collection = db['users']
 complaints_collection = db['complaints']
 criminal_records_collection = db['criminal_records']
 incidents_collection = db['incidents']
+cameras_collection = db['cameras']
+alerts_collection = db['alerts']
 
 # Helper functions for models can be added here if needed
 def parse_json(data):
