@@ -9,6 +9,7 @@ export default function Auth() {
   const [password, setPassword] = useState('');
   const [role, setRole] = useState('Citizen');
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
   
   const { login, register } = useAuth();
   const navigate = useNavigate();
@@ -16,6 +17,7 @@ export default function Auth() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
+    setLoading(true);
     
     if (isLogin) {
       const success = await login(username, password);
@@ -33,6 +35,7 @@ export default function Auth() {
         setError('Registration failed. Username may exist.');
       }
     }
+    setLoading(false);
   };
 
   return (
@@ -83,8 +86,8 @@ export default function Auth() {
             </select>
           )}
 
-          <button type="submit" className="btn-primary" style={{ marginTop: '16px' }}>
-            {isLogin ? 'Sign In' : 'Sign Up'}
+          <button type="submit" className="btn-primary" style={{ marginTop: '16px' }} disabled={loading}>
+            {loading ? 'Please wait...' : (isLogin ? 'Sign In' : 'Sign Up')}
           </button>
         </form>
 
