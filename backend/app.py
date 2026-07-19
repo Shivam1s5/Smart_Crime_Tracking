@@ -5,7 +5,6 @@ from flask_socketio import SocketIO
 from flask_bcrypt import Bcrypt
 from models import users_collection, complaints_collection, criminal_records_collection, parse_json
 from ml_clustering import calculate_risk_zones
-from ml_video import VideoProcessor
 import os
 from dotenv import load_dotenv
 from datetime import datetime
