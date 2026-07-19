@@ -148,4 +148,5 @@ def start_video():
     return jsonify({"message": "Camera is currently disabled per user request"}), 200
 
 if __name__ == '__main__':
-    socketio.run(app, debug=True, port=5000, allow_unsafe_werkzeug=True)
+    port = int(os.environ.get('PORT', 5000))
+    socketio.run(app, host='0.0.0.0', port=port, allow_unsafe_werkzeug=True)
