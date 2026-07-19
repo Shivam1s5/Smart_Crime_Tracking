@@ -172,6 +172,29 @@ def get_cameras():
         
     return jsonify(cameras), 200
 
+@app.route('/api/cameras', methods=['POST'])
+@jwt_required()
+def add_camera():
+    claims = get_jwt()
+    if claims.get('role') not in ['Police', 'Admin']:
+        return jsonify({'message': 'Unauthorized'}), 403
+    
+    data = request.get_json()
+    new_camera = {
+        'camera_id': data.get('camera_id', f"CAM-{datetime.utcnow().timestamp()}"),
+        'name': data.get('name'),
+        'area': data.get('area', 'Custom Area'),
+        'stream_url': data.get('stream_url'),
+        'lat': data.get('lat'),
+        'lng': data.get('lng'),
+        'status': 'Active'
+    }
+    
+    cameras_collection.insert_one(new_camera)
+    new_camera['_id'] = str(new_camera['_id'])
+    
+    return jsonify({'message': 'Camera added successfully', 'camera': new_camera}), 201
+
 @app.route('/api/alerts/trigger', methods=['POST'])
 def trigger_alert():
     # This endpoint is called by the AI Microservice

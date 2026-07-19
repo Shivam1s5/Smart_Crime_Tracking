@@ -2,31 +2,39 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { io } from 'socket.io-client';
 import { useAuth } from '../context/AuthContext';
-import RiskMap from '../components/Map';
-import { ShieldAlert, LogOut, Video, Search, AlertTriangle, AlertOctagon, X } from 'lucide-react';
+import { ShieldAlert, LogOut, Video, Search, AlertTriangle, AlertOctagon, X, MapPin, Plus, Camera } from 'lucide-react';
 
 export default function PoliceDashboard() {
   const { logout } = useAuth();
   const [alerts, setAlerts] = useState([]);
   const [cameras, setCameras] = useState([]);
-  const [selectedArea, setSelectedArea] = useState('Downtown');
+  const [selectedArea, setSelectedArea] = useState('Indirapuram'); // Defaulting to the user's example
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [redAlert, setRedAlert] = useState(null);
+  
+  // Geolocation and Add Camera State
+  const [policeLocation, setPoliceLocation] = useState({ lat: null, lng: null });
+  const [showAddCameraModal, setShowAddCameraModal] = useState(false);
+  const [newCameraData, setNewCameraData] = useState({ name: '', stream_url: '' });
 
   useEffect(() => {
-    // Fetch Cameras for this area (Mocking 'Downtown' area for now)
-    const fetchCameras = async () => {
-      try {
-        const res = await axios.get(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/cameras?area=${selectedArea}`, {
-          headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
-        });
-        setCameras(res.data);
-      } catch (err) {
-        console.error(err);
-      }
-    };
+    // Detect Police Location
+    if ("geolocation" in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          setPoliceLocation({
+            lat: position.coords.latitude,
+            lng: position.coords.longitude
+          });
+        },
+        (error) => {
+          console.error("Error getting location: ", error);
+        }
+      );
+    }
+
     fetchCameras();
 
     // Connect to WebSocket
@@ -36,10 +44,26 @@ export default function PoliceDashboard() {
     socket.on('red_alert', (data) => {
       setRedAlert(data);
       setAlerts((prev) => [data, ...prev]);
+      // Play a loud alert sound if possible
+      try {
+        const audio = new Audio('https://www.soundjay.com/buttons/sounds/beep-01a.mp3');
+        audio.play();
+      } catch (e) { }
     });
 
     return () => socket.disconnect();
   }, [selectedArea]);
+
+  const fetchCameras = async () => {
+    try {
+      const res = await axios.get(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/cameras?area=${selectedArea}`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+      });
+      setCameras(res.data);
+    } catch (err) {
+      console.error(err);
+    }
+  };
 
   const handleSearch = async (e) => {
     e.preventDefault();
@@ -51,6 +75,28 @@ export default function PoliceDashboard() {
       setSearchResults(res.data);
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  const handleAddCamera = async (e) => {
+    e.preventDefault();
+    try {
+      const payload = {
+        name: newCameraData.name,
+        stream_url: newCameraData.stream_url,
+        area: selectedArea,
+        lat: policeLocation.lat,
+        lng: policeLocation.lng
+      };
+      await axios.post(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/cameras`, payload, {
+          headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+      });
+      setShowAddCameraModal(false);
+      setNewCameraData({ name: '', stream_url: '' });
+      fetchCameras(); // Refresh cameras
+    } catch (err) {
+      console.error("Failed to add camera", err);
+      alert("Failed to add camera. Check console.");
     }
   };
 
@@ -73,23 +119,58 @@ export default function PoliceDashboard() {
       {redAlert && (
         <div style={{
           position: 'fixed', top: 0, left: 0, width: '100%', height: '100%',
-          background: 'rgba(220, 38, 38, 0.2)', backdropFilter: 'blur(10px)',
+          background: 'rgba(220, 38, 38, 0.4)', backdropFilter: 'blur(10px)',
           display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 9999,
-          animation: 'pulse 1s infinite'
+          animation: 'pulse 0.5s infinite'
         }}>
-          <div className="glass-panel" style={{ background: 'rgba(0,0,0,0.8)', border: '2px solid red', padding: '40px', maxWidth: '600px', textAlign: 'center', position: 'relative' }}>
+          <div className="glass-panel" style={{ background: 'rgba(0,0,0,0.9)', border: '4px solid red', padding: '40px', maxWidth: '600px', textAlign: 'center', position: 'relative', boxShadow: '0 0 50px red' }}>
             <button onClick={() => setRedAlert(null)} style={{ position: 'absolute', top: 10, right: 10, background: 'transparent', border: 'none', color: 'white', cursor: 'pointer' }}>
               <X size={24} />
             </button>
-            <AlertOctagon size={80} color="red" style={{ margin: '0 auto 20px auto' }} />
-            <h1 style={{ color: 'red', fontSize: '2.5rem', margin: '0 0 10px 0', textTransform: 'uppercase' }}>CRITICAL ALERT!</h1>
-            <h2 style={{ margin: '0 0 20px 0' }}>{redAlert.type} Detected in {redAlert.area}</h2>
-            <p style={{ fontSize: '1.2rem', color: '#ccc' }}>Confidence: <strong>{(redAlert.confidence * 100).toFixed(1)}%</strong></p>
-            <p style={{ fontSize: '1.1rem', color: '#ccc' }}>Camera: <strong>{redAlert.camera_id}</strong></p>
+            <AlertOctagon size={100} color="red" style={{ margin: '0 auto 20px auto' }} />
+            <h1 style={{ color: 'red', fontSize: '3rem', margin: '0 0 10px 0', textTransform: 'uppercase', textShadow: '0 0 20px red' }}>CRITICAL ALERT!</h1>
+            <h2 style={{ margin: '0 0 20px 0', fontSize: '1.8rem' }}>{redAlert.type} Detected in {redAlert.area}</h2>
+            <p style={{ fontSize: '1.4rem', color: '#fff' }}>Confidence: <strong style={{ color: 'red' }}>{(redAlert.confidence * 100).toFixed(1)}%</strong></p>
+            <p style={{ fontSize: '1.2rem', color: '#ccc' }}>Source Camera: <strong>{redAlert.camera_id}</strong></p>
             
-            <button className="btn-primary" onClick={() => setRedAlert(null)} style={{ marginTop: '30px', background: 'red', fontSize: '1.2rem', padding: '12px 30px' }}>
-              ACKNOWLEDGE
+            <button className="btn-primary" onClick={() => setRedAlert(null)} style={{ marginTop: '30px', background: 'red', fontSize: '1.5rem', padding: '15px 40px', fontWeight: 'bold' }}>
+              DISPATCH UNITS NOW
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Add Camera Modal */}
+      {showAddCameraModal && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, width: '100%', height: '100%',
+          background: 'rgba(0,0,0,0.7)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 1000
+        }}>
+          <div className="glass-panel" style={{ padding: '32px', width: '400px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '20px' }}>
+              <h2 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}><Camera /> Link New Camera</h2>
+              <X size={24} style={{ cursor: 'pointer' }} onClick={() => setShowAddCameraModal(false)} />
+            </div>
+            <form onSubmit={handleAddCamera} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              <div>
+                <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem' }}>Camera Name (e.g. Mall Gate 1)</label>
+                <input 
+                  type="text" className="input-glass" required
+                  value={newCameraData.name} onChange={e => setNewCameraData({...newCameraData, name: e.target.value})}
+                />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem' }}>Live Stream URL (IP Webcam link)</label>
+                <input 
+                  type="url" className="input-glass" required placeholder="http://192.168.x.x:8080/video"
+                  value={newCameraData.stream_url} onChange={e => setNewCameraData({...newCameraData, stream_url: e.target.value})}
+                />
+                <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                  Use any IP Webcam app on your phone to get an MJPEG stream URL and paste it here.
+                </p>
+              </div>
+              <button type="submit" className="btn-primary" style={{ marginTop: '10px' }}>Deploy & Monitor Camera</button>
+            </form>
           </div>
         </div>
       )}
@@ -98,8 +179,19 @@ export default function PoliceDashboard() {
       <div className="glass-panel" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 24px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
           <ShieldAlert color="var(--accent)" size={28} />
-          <h2 style={{ margin: 0, fontSize: '1.25rem' }}>Patrol Analytics Command Center</h2>
+          <h2 style={{ margin: 0, fontSize: '1.25rem' }}>Tactical Monitoring Command Center</h2>
         </div>
+        
+        {/* Police GPS Location Display */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: 'rgba(255,255,255,0.05)', padding: '8px 16px', borderRadius: '20px' }}>
+          <MapPin size={18} color={policeLocation.lat ? "var(--success)" : "var(--text-secondary)"} />
+          <span style={{ fontSize: '0.9rem' }}>
+            {policeLocation.lat 
+              ? `GPS Locked: ${policeLocation.lat.toFixed(4)}, ${policeLocation.lng.toFixed(4)}` 
+              : 'Acquiring GPS Signal...'}
+          </span>
+        </div>
+
         <button onClick={logout} style={{ background: 'transparent', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}>
           <LogOut size={18} /> Logout
         </button>
@@ -108,46 +200,75 @@ export default function PoliceDashboard() {
       {/* Main Content Grid */}
       <div style={{ display: 'grid', gridTemplateColumns: '3fr 1fr', gap: '16px', flex: 1, overflow: 'hidden' }}>
         
-        {/* Left Column: Map, Cameras & ML Controls */}
+        {/* Left Column: Cameras & ML Controls */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', overflow: 'hidden' }}>
           
-          {/* Top Half: Cameras (New) */}
-          <div className="glass-panel animate-fade-in" style={{ padding: '16px', display: 'flex', flexDirection: 'column' }}>
+          {/* Top Half: Real-time Cameras */}
+          <div className="glass-panel animate-fade-in" style={{ padding: '16px', display: 'flex', flexDirection: 'column', flex: 1 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-              <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <Video size={20} color="var(--accent)" /> Live Area Cameras
-              </h3>
-              <select 
-                className="input-glass" 
-                style={{ width: 'auto', margin: 0, backgroundColor: 'rgba(15,23,42,0.9)' }}
-                value={selectedArea}
-                onChange={(e) => setSelectedArea(e.target.value)}
-              >
-                <option value="Downtown">Downtown</option>
-                <option value="North Side">North Side</option>
-                <option value="West End">West End</option>
-                <option value="South Central">South Central</option>
-              </select>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+                <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Video size={20} color="var(--accent)" /> Active Live Streams
+                </h3>
+                <select 
+                  className="input-glass" 
+                  style={{ width: 'auto', margin: 0, backgroundColor: 'rgba(15,23,42,0.9)', padding: '6px 12px' }}
+                  value={selectedArea}
+                  onChange={(e) => setSelectedArea(e.target.value)}
+                >
+                  <option value="Indirapuram">Indirapuram</option>
+                  <option value="Downtown">Downtown</option>
+                  <option value="North Side">North Side</option>
+                  <option value="West End">West End</option>
+                </select>
+              </div>
+              <button className="btn-primary" style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', gap: '6px' }} onClick={() => setShowAddCameraModal(true)}>
+                <Plus size={18} /> Add Real Camera
+              </button>
             </div>
-            <div style={{ display: 'flex', gap: '16px', overflowX: 'auto', paddingBottom: '8px' }}>
+            
+            <div style={{ display: 'flex', gap: '16px', overflowX: 'auto', paddingBottom: '8px', flex: 1 }}>
               {cameras.length === 0 ? (
-                 <p style={{ color: 'var(--text-secondary)' }}>No cameras linked to this area.</p>
+                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', width: '100%', color: 'var(--text-secondary)' }}>
+                   <Camera size={48} style={{ opacity: 0.2, marginBottom: '16px' }} />
+                   <p>No cameras deployed in {selectedArea}.</p>
+                   <p style={{ fontSize: '0.9rem' }}>Click "Add Real Camera" to link an IP stream.</p>
+                 </div>
               ) : (
                 cameras.map((cam) => (
-                  <div key={cam._id} style={{ minWidth: '300px', background: 'rgba(255,255,255,0.05)', padding: '12px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)' }}>
-                    <div style={{ width: '100%', height: '170px', background: '#000', borderRadius: '4px', marginBottom: '8px', position: 'relative', overflow: 'hidden' }}>
-                      {/* Live Video Feed Simulation */}
-                      <span style={{ position: 'absolute', top: 8, right: 8, background: 'red', color: 'white', fontSize: '0.7rem', padding: '3px 8px', borderRadius: '4px', fontWeight: 'bold', zIndex: 10, animation: 'pulse 2s infinite' }}>LIVE</span>
-                      <iframe 
-                        src={`https://www.youtube.com/embed/1EiC9bvVGnk?autoplay=1&mute=1&controls=0&showinfo=0&loop=1&playlist=1EiC9bvVGnk`}
-                        title="Live Traffic Camera"
-                        frameBorder="0"
-                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                        style={{ width: '100%', height: '100%', pointerEvents: 'none' }}
-                      ></iframe>
+                  <div key={cam._id} style={{ minWidth: '400px', background: 'rgba(255,255,255,0.05)', padding: '12px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)', display: 'flex', flexDirection: 'column' }}>
+                    <div style={{ width: '100%', flex: 1, background: '#000', borderRadius: '4px', marginBottom: '8px', position: 'relative', overflow: 'hidden' }}>
+                      <span style={{ position: 'absolute', top: 8, right: 8, background: 'red', color: 'white', fontSize: '0.7rem', padding: '3px 8px', borderRadius: '4px', fontWeight: 'bold', zIndex: 10, animation: 'pulse 2s infinite' }}>LIVE REC</span>
+                      
+                      {cam.stream_url ? (
+                        // If user provided a real IP stream, use img tag (best for MJPEG) or iframe
+                        cam.stream_url.includes('youtube.com') ? (
+                          <iframe src={cam.stream_url} frameBorder="0" allow="autoplay; encrypted-media" style={{ width: '100%', height: '100%' }}></iframe>
+                        ) : (
+                          <img src={cam.stream_url} alt="Live Stream" style={{ width: '100%', height: '100%', objectFit: 'cover' }} 
+                            onError={(e) => { e.target.onerror = null; e.target.src = "https://via.placeholder.com/400x200?text=Camera+Offline"; }}
+                          />
+                        )
+                      ) : (
+                        // Default simulation
+                        <iframe 
+                          src={`https://www.youtube.com/embed/1EiC9bvVGnk?autoplay=1&mute=1&controls=0&showinfo=0&loop=1&playlist=1EiC9bvVGnk`}
+                          title="Simulated Camera" frameBorder="0" allow="autoplay"
+                          style={{ width: '100%', height: '100%', pointerEvents: 'none' }}
+                        ></iframe>
+                      )}
                     </div>
-                    <strong style={{ display: 'block', fontSize: '0.95rem' }}>{cam.name}</strong>
-                    <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>ID: {cam.camera_id}</span>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                      <div>
+                        <strong style={{ display: 'block', fontSize: '1.05rem', color: 'var(--accent)' }}>{cam.name}</strong>
+                        <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>ID: {cam.camera_id}</span>
+                      </div>
+                      {cam.lat && (
+                        <div style={{ fontSize: '0.75rem', textAlign: 'right', color: 'var(--text-secondary)' }}>
+                          GPS: {parseFloat(cam.lat).toFixed(3)}, {parseFloat(cam.lng).toFixed(3)}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 ))
               )}
@@ -155,13 +276,13 @@ export default function PoliceDashboard() {
           </div>
 
           {/* Bottom Half: ML Controls & Search */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', flex: 1 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
             <div className="glass-panel" style={{ padding: '24px' }}>
               <h3 style={{ marginTop: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <AlertTriangle size={20} color="var(--accent)" /> ML Surveillance Link
+                <AlertTriangle size={20} color="var(--accent)" /> AI Threat Analysis Engine
               </h3>
               <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '16px' }}>
-                Connect to the AI Microservice for real-time weapon and anomaly detection on connected cameras.
+                Bind the local AI Microservice to these active video streams. The AI will scan frames for weapons/anomalies in the background.
               </p>
               <button 
                 className="btn-primary" 
@@ -169,13 +290,13 @@ export default function PoliceDashboard() {
                 disabled={isProcessing}
                 style={{ background: isProcessing ? 'var(--success)' : 'var(--accent)' }}
               >
-                {isProcessing ? 'Engine Linked & Monitoring...' : 'Link AI Detection Engine'}
+                {isProcessing ? 'AI Engine Linked & Monitoring Active' : 'Start Background AI Monitoring'}
               </button>
             </div>
 
             <div className="glass-panel" style={{ padding: '24px' }}>
               <h3 style={{ marginTop: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <Search size={20} color="var(--accent)" /> Criminal Records DB
+                <Search size={20} color="var(--accent)" /> Suspect Records
               </h3>
               <form onSubmit={handleSearch} style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
                 <input
@@ -203,7 +324,7 @@ export default function PoliceDashboard() {
         {/* Right Column: Live Alerts Feed */}
         <div className="glass-panel animate-fade-in" style={{ padding: '24px', display: 'flex', flexDirection: 'column' }}>
           <h3 style={{ marginTop: 0, display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--danger)' }}>
-            <AlertTriangle size={20} /> Live Alerts
+            <AlertTriangle size={20} /> Actionable Alerts
           </h3>
           <div style={{ flex: 1, overflowY: 'auto', paddingRight: '8px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
             {alerts.length === 0 ? (
