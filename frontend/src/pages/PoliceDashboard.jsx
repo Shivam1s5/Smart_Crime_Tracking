@@ -19,7 +19,7 @@ const LocalWebcam = React.forwardRef((props, ref) => {
         console.error("Local webcam error", err);
       });
   }, [ref]);
-  return <video ref={ref} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', position: 'relative', zIndex: 2 }} />;
+  return <video ref={ref} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'fill', position: 'relative', zIndex: 2 }} />;
 });
 
 export default function PoliceDashboard() {
@@ -38,6 +38,7 @@ export default function PoliceDashboard() {
   const [newCameraData, setNewCameraData] = useState({ name: '', stream_url: '', location: '' });
   const [useLaptopCamera, setUseLaptopCamera] = useState(false);
   const laptopVideoRef = useRef(null);
+  const canvasRef = useRef(null);
   const [model, setModel] = useState(null);
   const [poseModel, setPoseModel] = useState(null);
 
@@ -187,37 +188,69 @@ export default function PoliceDashboard() {
      
      setInterval(async () => {
         if (laptopVideoRef.current && laptopVideoRef.current.readyState === 4) {
+           const video = laptopVideoRef.current;
+           const canvas = canvasRef.current;
+           const ctx = canvas ? canvas.getContext('2d') : null;
+           
+           if (canvas && ctx) {
+               canvas.width = video.videoWidth;
+               canvas.height = video.videoHeight;
+               ctx.clearRect(0, 0, canvas.width, canvas.height);
+               ctx.font = '16px Arial';
+           }
+
            // A. Object Detection for Real Weapons
-           const predictions = await loadedModel.detect(laptopVideoRef.current);
+           const predictions = await loadedModel.detect(video);
            const dangerousObjects = ['knife', 'baseball bat', 'scissors', 'gun']; 
            for (let p of predictions) {
-               if (dangerousObjects.includes(p.class) && p.score > 0.5) {
+               if (ctx && p.score > 0.3) {
+                   ctx.beginPath();
+                   ctx.rect(...p.bbox);
+                   ctx.lineWidth = 3;
+                   ctx.strokeStyle = dangerousObjects.includes(p.class) ? '#ff0000' : '#00ff00';
+                   ctx.fillStyle = dangerousObjects.includes(p.class) ? '#ff0000' : '#00ff00';
+                   ctx.stroke();
+                   ctx.fillText(`${p.class} (${Math.round(p.score * 100)}%)`, p.bbox[0], p.bbox[1] > 20 ? p.bbox[1] - 5 : 20);
+               }
+
+               if (dangerousObjects.includes(p.class) && p.score > 0.25) {
                   triggerRealAlert(`Weapon: ${p.class}`, p.score);
                }
            }
            
            // B. Pose Detection for Fighting/Violence
-           const poses = await loadedPoseModel.estimatePoses(laptopVideoRef.current);
+           const poses = await loadedPoseModel.estimatePoses(video);
            if (poses.length > 0) {
                const keypoints = poses[0].keypoints;
+               
+               if (ctx) {
+                   keypoints.forEach(k => {
+                       if (k.score > 0.3) {
+                           ctx.beginPath();
+                           ctx.arc(k.x, k.y, 6, 0, 2 * Math.PI);
+                           ctx.fillStyle = '#00ffff';
+                           ctx.fill();
+                       }
+                   });
+               }
+
                const leftWrist = keypoints.find(k => k.name === 'left_wrist');
                const rightWrist = keypoints.find(k => k.name === 'right_wrist');
                const leftShoulder = keypoints.find(k => k.name === 'left_shoulder');
                const rightShoulder = keypoints.find(k => k.name === 'right_shoulder');
                
-               // Check if wrists are visible and raised near or above shoulders (Guard up / Fighting pose)
-               // In image coordinates, y is 0 at the top, so lower y means higher up physically.
+               // Check if AT LEAST ONE wrist is raised above the shoulder (Fighting stance / punching)
                if (leftWrist && rightWrist && leftShoulder && rightShoulder) {
-                   const isLeftWristRaised = leftWrist.score > 0.4 && leftWrist.y < leftShoulder.y;
-                   const isRightWristRaised = rightWrist.score > 0.4 && rightWrist.y < rightShoulder.y;
+                   const isLeftWristRaised = leftWrist.score > 0.3 && leftWrist.y < leftShoulder.y;
+                   const isRightWristRaised = rightWrist.score > 0.3 && rightWrist.y < rightShoulder.y;
                    
-                   if (isLeftWristRaised && isRightWristRaised) {
+                   if (isLeftWristRaised || isRightWristRaised) {
                        triggerRealAlert('Violence: Fighting Pose', Math.max(leftWrist.score, rightWrist.score));
                    }
                }
            }
         }
-     }, 1000); // Scan every 1 second
+     }, 300); // Scan faster (every 300ms) for better UX
   };
 
   const startVideoProcessing = async () => {
@@ -371,7 +404,10 @@ export default function PoliceDashboard() {
                       
                       {cam.stream_url ? (
                         cam.stream_url === 'LOCAL_WEBCAM' ? (
-                          <LocalWebcam ref={laptopVideoRef} />
+                          <>
+                            <LocalWebcam ref={laptopVideoRef} />
+                            <canvas ref={canvasRef} style={{ width: '100%', height: '100%', position: 'absolute', top: 0, left: 0, zIndex: 3, pointerEvents: 'none' }} />
+                          </>
                         ) : cam.stream_url.includes('youtube.com') ? (
                           <iframe src={cam.stream_url} frameBorder="0" allow="autoplay; encrypted-media" style={{ width: '100%', height: '100%', position: 'relative', zIndex: 2 }}></iframe>
                         ) : (
