@@ -250,21 +250,17 @@ export default function PoliceDashboard() {
                       <span style={{ position: 'absolute', top: 8, right: 8, background: 'red', color: 'white', fontSize: '0.7rem', padding: '3px 8px', borderRadius: '4px', fontWeight: 'bold', zIndex: 10, animation: 'pulse 2s infinite' }}>LIVE REC</span>
                       
                       {cam.stream_url ? (
-                        // If user provided a real IP stream, use img tag (best for MJPEG) or iframe
                         cam.stream_url.includes('youtube.com') ? (
                           <iframe src={cam.stream_url} frameBorder="0" allow="autoplay; encrypted-media" style={{ width: '100%', height: '100%' }}></iframe>
                         ) : (
                           <img src={cam.stream_url} alt="Live Stream" style={{ width: '100%', height: '100%', objectFit: 'cover' }} 
-                            onError={(e) => { e.target.onerror = null; e.target.src = "https://via.placeholder.com/400x200?text=Camera+Offline"; }}
+                            onError={(e) => { e.target.onerror = null; e.target.src = "https://placehold.co/400x200?text=Camera+Offline"; }}
                           />
                         )
                       ) : (
-                        // Default simulation
-                        <iframe 
-                          src={`https://www.youtube.com/embed/1EiC9bvVGnk?autoplay=1&mute=1&controls=0&showinfo=0&loop=1&playlist=1EiC9bvVGnk`}
-                          title="Simulated Camera" frameBorder="0" allow="autoplay"
-                          style={{ width: '100%', height: '100%', pointerEvents: 'none' }}
-                        ></iframe>
+                        <div style={{ width: '100%', height: '100%', display: 'flex', justifyContent: 'center', alignItems: 'center', color: 'var(--text-secondary)' }}>
+                           No Stream Linked
+                        </div>
                       )}
                     </div>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
