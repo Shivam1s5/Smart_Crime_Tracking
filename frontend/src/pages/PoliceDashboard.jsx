@@ -171,12 +171,15 @@ export default function PoliceDashboard() {
   };
 
   const runRealAI = async () => {
-     // 1. Load Object Detection Model
-     let loadedModel = model;
-     if (!loadedModel) {
-        loadedModel = await cocossd.load();
-        setModel(loadedModel);
-     }
+     try {
+         await tf.ready();
+         
+         // 1. Load Object Detection Model
+         let loadedModel = model;
+         if (!loadedModel) {
+            loadedModel = await cocossd.load();
+            setModel(loadedModel);
+         }
      
      // 2. Load Pose Detection Model
      let loadedPoseModel = poseModel;
@@ -251,6 +254,9 @@ export default function PoliceDashboard() {
            }
         }
      }, 300); // Scan faster (every 300ms) for better UX
+     } catch (e) {
+         console.error("AI Initialization Error:", e);
+     }
   };
 
   const startVideoProcessing = async () => {
