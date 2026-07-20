@@ -1,8 +1,24 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { io } from 'socket.io-client';
 import { useAuth } from '../context/AuthContext';
 import { ShieldAlert, LogOut, Video, Search, AlertTriangle, AlertOctagon, X, MapPin, Plus, Camera } from 'lucide-react';
+
+const LocalWebcam = () => {
+  const videoRef = useRef(null);
+  useEffect(() => {
+    navigator.mediaDevices.getUserMedia({ video: true })
+      .then(stream => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+        }
+      })
+      .catch(err => {
+        console.error("Local webcam error", err);
+      });
+  }, []);
+  return <video ref={videoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', position: 'relative', zIndex: 2 }} />;
+};
 
 export default function PoliceDashboard() {
   const { logout } = useAuth();
@@ -18,6 +34,7 @@ export default function PoliceDashboard() {
   const [policeAddress, setPoliceAddress] = useState('');
   const [showAddCameraModal, setShowAddCameraModal] = useState(false);
   const [newCameraData, setNewCameraData] = useState({ name: '', stream_url: '', location: '' });
+  const [useLaptopCamera, setUseLaptopCamera] = useState(false);
 
   useEffect(() => {
     // Detect Police Location
@@ -91,10 +108,15 @@ export default function PoliceDashboard() {
 
   const handleAddCamera = async (e) => {
     e.preventDefault();
+    if (!useLaptopCamera && !newCameraData.stream_url) {
+      alert("Please enter a stream URL or select Laptop Camera.");
+      return;
+    }
+    
     try {
       const payload = {
         name: newCameraData.name,
-        stream_url: newCameraData.stream_url,
+        stream_url: useLaptopCamera ? 'LOCAL_WEBCAM' : newCameraData.stream_url,
         area: newCameraData.location,
         lat: policeLocation.lat,
         lng: policeLocation.lng
@@ -104,6 +126,7 @@ export default function PoliceDashboard() {
       });
       setShowAddCameraModal(false);
       setNewCameraData({ name: '', stream_url: '', location: '' });
+      setUseLaptopCamera(false);
       fetchCameras(); // Refresh cameras
     } catch (err) {
       console.error("Failed to add camera", err);
@@ -190,14 +213,22 @@ export default function PoliceDashboard() {
                 />
               </div>
               <div>
-                <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem' }}>Live Stream URL (IP Webcam link)</label>
-                <input 
-                  type="url" className="input-glass" required placeholder="http://192.168.x.x:8080/video"
-                  value={newCameraData.stream_url} onChange={e => setNewCameraData({...newCameraData, stream_url: e.target.value})}
-                />
-                <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                  Use any IP Webcam app on your phone to get an MJPEG stream URL and paste it here.
-                </p>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', color: 'white', marginBottom: '8px' }}>
+                  <input type="checkbox" checked={useLaptopCamera} onChange={(e) => setUseLaptopCamera(e.target.checked)} style={{ width: '16px', height: '16px', accentColor: 'var(--accent)' }} />
+                  Use my Laptop's built-in Webcam
+                </label>
+                {!useLaptopCamera && (
+                  <>
+                    <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem' }}>Live Stream URL (IP Webcam link)</label>
+                    <input 
+                      type="url" className="input-glass" required placeholder="http://192.168.x.x:8080/video"
+                      value={newCameraData.stream_url} onChange={e => setNewCameraData({...newCameraData, stream_url: e.target.value})}
+                    />
+                    <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                      Use any IP Webcam app on your phone to get an MJPEG stream URL and paste it here.
+                    </p>
+                  </>
+                )}
               </div>
               <button type="submit" className="btn-primary" style={{ marginTop: '10px' }}>Deploy & Monitor Camera</button>
             </form>
@@ -264,7 +295,9 @@ export default function PoliceDashboard() {
                       <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', display: 'flex', justifyContent: 'center', alignItems: 'center', color: 'var(--text-secondary)', zIndex: 1 }}>Camera Offline or Unreachable</div>
                       
                       {cam.stream_url ? (
-                        cam.stream_url.includes('youtube.com') ? (
+                        cam.stream_url === 'LOCAL_WEBCAM' ? (
+                          <LocalWebcam />
+                        ) : cam.stream_url.includes('youtube.com') ? (
                           <iframe src={cam.stream_url} frameBorder="0" allow="autoplay; encrypted-media" style={{ width: '100%', height: '100%', position: 'relative', zIndex: 2 }}></iframe>
                         ) : (
                           <img src={cam.stream_url} alt="Live Stream" style={{ width: '100%', height: '100%', objectFit: 'cover', position: 'relative', zIndex: 2 }} 
