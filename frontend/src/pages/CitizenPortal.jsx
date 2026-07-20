@@ -17,7 +17,7 @@ export default function CitizenPortal() {
 
   const fetchComplaints = async () => {
     try {
-      const res = await axios.get(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/complaints`, {
+      const res = await axios.get(`${import.meta.env.VITE_API_URL || 'https://smart-crime-tracking.onrender.com'}/api/complaints`, {
         headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
       });
       setComplaints(res.data);
@@ -30,7 +30,7 @@ export default function CitizenPortal() {
     e.preventDefault();
     setLoading(true);
     try {
-      await axios.post(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/complaints`, {
+      await axios.post(`${import.meta.env.VITE_API_URL || 'https://smart-crime-tracking.onrender.com'}/api/complaints`, {
         description,
         location,
         area: thana,

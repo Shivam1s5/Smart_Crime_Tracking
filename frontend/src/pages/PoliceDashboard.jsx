@@ -49,7 +49,7 @@ export default function PoliceDashboard() {
     fetchCameras();
 
     // Connect to WebSocket
-    const socketUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+    const socketUrl = import.meta.env.VITE_API_URL || 'https://smart-crime-tracking.onrender.com';
     const socket = io(socketUrl);
     
     socket.on('red_alert', (data) => {
@@ -67,7 +67,7 @@ export default function PoliceDashboard() {
 
   const fetchCameras = async () => {
     try {
-      const res = await axios.get(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/cameras`, {
+      const res = await axios.get(`${import.meta.env.VITE_API_URL || 'https://smart-crime-tracking.onrender.com'}/api/cameras`, {
         headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
       });
       setCameras(res.data);
@@ -80,7 +80,7 @@ export default function PoliceDashboard() {
     e.preventDefault();
     if (!searchQuery) return;
     try {
-      const res = await axios.get(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/records/search?q=${searchQuery}`, {
+      const res = await axios.get(`${import.meta.env.VITE_API_URL || 'https://smart-crime-tracking.onrender.com'}/api/records/search?q=${searchQuery}`, {
           headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
       });
       setSearchResults(res.data);
@@ -99,7 +99,7 @@ export default function PoliceDashboard() {
         lat: policeLocation.lat,
         lng: policeLocation.lng
       };
-      await axios.post(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/cameras`, payload, {
+      await axios.post(`${import.meta.env.VITE_API_URL || 'https://smart-crime-tracking.onrender.com'}/api/cameras`, payload, {
           headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
       });
       setShowAddCameraModal(false);
@@ -114,7 +114,7 @@ export default function PoliceDashboard() {
   const startVideoProcessing = async () => {
     try {
       setIsProcessing(true);
-      await axios.post(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/video/start`, {}, {
+      await axios.post(`${import.meta.env.VITE_API_URL || 'https://smart-crime-tracking.onrender.com'}/api/video/start`, {}, {
           headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
       });
     } catch (err) {

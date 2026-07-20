@@ -21,7 +21,7 @@ export const AuthProvider = ({ children }) => {
 
   const login = async (username, password) => {
     try {
-      const res = await axios.post(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/auth/login`, { username, password });
+      const res = await axios.post(`${import.meta.env.VITE_API_URL || 'https://smart-crime-tracking.onrender.com'}/api/auth/login`, { username, password });
       const { token, role } = res.data;
       localStorage.setItem('token', token);
       localStorage.setItem('role', role);
@@ -36,7 +36,7 @@ export const AuthProvider = ({ children }) => {
 
   const register = async (username, password, role) => {
     try {
-      await axios.post(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/auth/register`, { username, password, role });
+      await axios.post(`${import.meta.env.VITE_API_URL || 'https://smart-crime-tracking.onrender.com'}/api/auth/register`, { username, password, role });
       return true;
     } catch (err) {
       console.error(err);

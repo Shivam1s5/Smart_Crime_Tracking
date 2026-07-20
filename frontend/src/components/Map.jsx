@@ -12,7 +12,7 @@ export default function RiskMap() {
 
   const fetchZones = async () => {
     try {
-      const res = await axios.get('http://localhost:5000/api/zones');
+      const res = await axios.get('https://smart-crime-tracking.onrender.com/api/zones');
       setZones(res.data);
     } catch (err) {
       console.error(err);
