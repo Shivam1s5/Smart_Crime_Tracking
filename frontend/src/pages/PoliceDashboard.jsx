@@ -41,8 +41,23 @@ export default function PoliceDashboard() {
   const canvasRef = useRef(null);
   const [model, setModel] = useState(null);
   const [poseModel, setPoseModel] = useState(null);
+  const aiIntervalRef = useRef(null);
 
   useEffect(() => {
+    // Pre-load AI models for instant responsiveness
+    const loadModels = async () => {
+      try {
+        await tf.ready();
+        const loadedObject = await cocossd.load();
+        setModel(loadedObject);
+        const detectorConfig = {modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING};
+        const loadedPose = await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, detectorConfig);
+        setPoseModel(loadedPose);
+      } catch (e) {
+        console.error("Error pre-loading models:", e);
+      }
+    };
+    loadModels();
     // Detect Police Location
     if ("geolocation" in navigator) {
       navigator.geolocation.getCurrentPosition(
@@ -70,6 +85,7 @@ export default function PoliceDashboard() {
     }
 
     fetchCameras();
+    fetchAlerts();
 
     // Connect to WebSocket
     const socketUrl = import.meta.env.VITE_API_URL || 'https://smart-crime-tracking.onrender.com';
@@ -94,6 +110,28 @@ export default function PoliceDashboard() {
         headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
       });
       setCameras(res.data);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const fetchAlerts = async () => {
+    try {
+      const res = await axios.get(`${import.meta.env.VITE_API_URL || 'https://smart-crime-tracking.onrender.com'}/api/alerts`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+      });
+      setAlerts(res.data);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleDeleteAlert = async (alertId) => {
+    try {
+      await axios.delete(`${import.meta.env.VITE_API_URL || 'https://smart-crime-tracking.onrender.com'}/api/alerts/${alertId}`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+      });
+      setAlerts(alerts.filter(a => a._id !== alertId));
     } catch (err) {
       console.error(err);
     }
@@ -152,12 +190,31 @@ export default function PoliceDashboard() {
     }
   };
 
+  const captureScreenshot = () => {
+    try {
+      const video = laptopVideoRef.current;
+      if (!video) return '';
+      const snapCanvas = document.createElement('canvas');
+      snapCanvas.width = video.videoWidth;
+      snapCanvas.height = video.videoHeight;
+      const snapCtx = snapCanvas.getContext('2d');
+      snapCtx.drawImage(video, 0, 0, snapCanvas.width, snapCanvas.height);
+      return snapCanvas.toDataURL('image/jpeg', 0.7); // 70% quality jpeg
+    } catch (e) {
+      console.error("Screenshot error", e);
+      return '';
+    }
+  };
+
   const triggerRealAlert = async (type, score) => {
-    if (window.lastAlertTime && Date.now() - window.lastAlertTime < 8000) return;
+    // Reduced throttle to 4 seconds to catch repeated instances faster
+    if (window.lastAlertTime && Date.now() - window.lastAlertTime < 4000) return;
     window.lastAlertTime = Date.now();
     
     const cam = cameras.find(c => c.stream_url === 'LOCAL_WEBCAM');
     if (!cam) return;
+    
+    const image_base64 = captureScreenshot();
     
     try {
       await axios.post(`${import.meta.env.VITE_API_URL || 'https://smart-crime-tracking.onrender.com'}/api/alerts/trigger`, {
@@ -165,7 +222,7 @@ export default function PoliceDashboard() {
           area: cam.area,
           type: type.toUpperCase(),
           confidence: score,
-          image_url: ''
+          image_base64: image_base64
       });
     } catch (e) { console.error("Error triggering real AI alert", e); }
   };
@@ -174,22 +231,15 @@ export default function PoliceDashboard() {
      try {
          await tf.ready();
          
-         // 1. Load Object Detection Model
-         let loadedModel = model;
-         if (!loadedModel) {
-            loadedModel = await cocossd.load();
-            setModel(loadedModel);
+         if (!model || !poseModel) {
+            alert("AI Models are still loading. Please wait a few seconds and try again.");
+            setIsProcessing(false);
+            return;
          }
+         
+         if (aiIntervalRef.current) clearInterval(aiIntervalRef.current);
      
-     // 2. Load Pose Detection Model
-     let loadedPoseModel = poseModel;
-     if (!loadedPoseModel) {
-        const detectorConfig = {modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING};
-        loadedPoseModel = await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, detectorConfig);
-        setPoseModel(loadedPoseModel);
-     }
-     
-     setInterval(async () => {
+         aiIntervalRef.current = setInterval(async () => {
         if (laptopVideoRef.current && laptopVideoRef.current.readyState === 4) {
            const video = laptopVideoRef.current;
            const canvas = canvasRef.current;
@@ -203,10 +253,10 @@ export default function PoliceDashboard() {
            }
 
            // A. Object Detection for Real Weapons
-           const predictions = await loadedModel.detect(video);
+           const predictions = await model.detect(video);
            const dangerousObjects = ['knife', 'baseball bat', 'scissors', 'gun']; 
            for (let p of predictions) {
-               if (ctx && p.score > 0.3) {
+               if (ctx && p.score > 0.25) {
                    ctx.beginPath();
                    ctx.rect(...p.bbox);
                    ctx.lineWidth = 3;
@@ -216,19 +266,19 @@ export default function PoliceDashboard() {
                    ctx.fillText(`${p.class} (${Math.round(p.score * 100)}%)`, p.bbox[0], p.bbox[1] > 20 ? p.bbox[1] - 5 : 20);
                }
 
-               if (dangerousObjects.includes(p.class) && p.score > 0.25) {
+               if (dangerousObjects.includes(p.class) && p.score > 0.2) {
                   triggerRealAlert(`Weapon: ${p.class}`, p.score);
                }
            }
            
            // B. Pose Detection for Fighting/Violence
-           const poses = await loadedPoseModel.estimatePoses(video);
+           const poses = await poseModel.estimatePoses(video);
            if (poses.length > 0) {
                const keypoints = poses[0].keypoints;
                
                if (ctx) {
                    keypoints.forEach(k => {
-                       if (k.score > 0.3) {
+                       if (k.score > 0.25) {
                            ctx.beginPath();
                            ctx.arc(k.x, k.y, 6, 0, 2 * Math.PI);
                            ctx.fillStyle = '#00ffff';
@@ -244,8 +294,8 @@ export default function PoliceDashboard() {
                
                // Check if AT LEAST ONE wrist is raised above the shoulder (Fighting stance / punching)
                if (leftWrist && rightWrist && leftShoulder && rightShoulder) {
-                   const isLeftWristRaised = leftWrist.score > 0.3 && leftWrist.y < leftShoulder.y;
-                   const isRightWristRaised = rightWrist.score > 0.3 && rightWrist.y < rightShoulder.y;
+                   const isLeftWristRaised = leftWrist.score > 0.25 && leftWrist.y < leftShoulder.y;
+                   const isRightWristRaised = rightWrist.score > 0.25 && rightWrist.y < rightShoulder.y;
                    
                    if (isLeftWristRaised || isRightWristRaised) {
                        triggerRealAlert('Violence: Fighting Pose', Math.max(leftWrist.score, rightWrist.score));
@@ -253,10 +303,21 @@ export default function PoliceDashboard() {
                }
            }
         }
-     }, 300); // Scan faster (every 300ms) for better UX
+     }, 200); // Scan faster (every 200ms) for better UX
      } catch (e) {
          console.error("AI Initialization Error:", e);
+         setIsProcessing(false);
      }
+  };
+
+  const stopVideoProcessing = () => {
+    if (aiIntervalRef.current) clearInterval(aiIntervalRef.current);
+    const canvas = canvasRef.current;
+    if (canvas) {
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+    setIsProcessing(false);
   };
 
   const startVideoProcessing = async () => {
@@ -402,8 +463,8 @@ export default function PoliceDashboard() {
                  </div>
               ) : (
                 cameras.map((cam) => (
-                  <div key={cam._id} style={{ minWidth: '400px', background: 'rgba(255,255,255,0.05)', padding: '12px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)', display: 'flex', flexDirection: 'column' }}>
-                    <div style={{ width: '100%', flex: 1, background: '#000', borderRadius: '4px', marginBottom: '8px', position: 'relative', overflow: 'hidden' }}>
+                  <div key={cam._id} style={{ minWidth: '400px', resize: 'horizontal', overflow: 'hidden', background: 'rgba(255,255,255,0.05)', padding: '12px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)', display: 'flex', flexDirection: 'column' }}>
+                    <div style={{ width: '100%', flex: 1, background: '#000', borderRadius: '4px', marginBottom: '8px', position: 'relative', overflow: 'hidden', minHeight: '200px' }}>
                       <span style={{ position: 'absolute', top: 8, right: 8, background: 'red', color: 'white', fontSize: '0.7rem', padding: '3px 8px', borderRadius: '4px', fontWeight: 'bold', zIndex: 10, animation: 'pulse 2s infinite' }}>LIVE REC</span>
                       
                       <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', display: 'flex', justifyContent: 'center', alignItems: 'center', color: 'var(--text-secondary)', zIndex: 1 }}>Camera Offline or Unreachable</div>
@@ -461,14 +522,25 @@ export default function PoliceDashboard() {
               <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '16px' }}>
                 Bind the local AI Microservice to these active video streams. The AI will scan frames for weapons/anomalies in the background.
               </p>
-              <button 
-                className="btn-primary" 
-                onClick={startVideoProcessing}
-                disabled={isProcessing}
-                style={{ background: isProcessing ? 'var(--success)' : 'var(--accent)' }}
-              >
-                {isProcessing ? 'AI Engine Linked & Monitoring Active' : 'Start Background AI Monitoring'}
-              </button>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                  <button 
+                    className="btn-primary" 
+                    onClick={startVideoProcessing}
+                    disabled={isProcessing}
+                    style={{ background: isProcessing ? 'var(--success)' : 'var(--accent)', flex: 1 }}
+                  >
+                    {isProcessing ? 'Monitoring Active' : 'Start AI Monitoring'}
+                  </button>
+                  {isProcessing && (
+                      <button 
+                        className="btn-primary" 
+                        onClick={stopVideoProcessing}
+                        style={{ background: 'var(--danger)' }}
+                      >
+                        Stop
+                      </button>
+                  )}
+              </div>
             </div>
 
             <div className="glass-panel" style={{ padding: '24px' }}>
@@ -511,12 +583,22 @@ export default function PoliceDashboard() {
                 <div key={i} className="alert-card animate-fade-in">
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
                     <strong style={{ color: 'var(--danger)' }}>{alert.type.toUpperCase()}</strong>
-                    <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                      {new Date(alert.timestamp).toLocaleTimeString()}
-                    </span>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                        <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                          {new Date(alert.timestamp).toLocaleTimeString()}
+                        </span>
+                        <X size={16} style={{ cursor: 'pointer', color: 'var(--text-secondary)' }} onClick={() => handleDeleteAlert(alert._id)} />
+                    </div>
                   </div>
                   <p style={{ margin: '0 0 8px 0', fontSize: '0.9rem' }}>Area: {alert.area}</p>
                   <p style={{ margin: '0 0 8px 0', fontSize: '0.9rem' }}>Cam: {alert.camera_id}</p>
+                  
+                  {alert.image_url && (
+                      <div style={{ marginBottom: '8px', borderRadius: '4px', overflow: 'hidden', border: '1px solid rgba(255,0,0,0.3)' }}>
+                          <img src={alert.image_url} alt="Crime Evidence" style={{ width: '100%', display: 'block' }} />
+                      </div>
+                  )}
+
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <div style={{ height: '6px', background: 'rgba(255,255,255,0.2)', borderRadius: '3px', flex: 1 }}>
                       <div style={{ height: '100%', background: 'var(--danger)', borderRadius: '3px', width: `${alert.confidence * 100}%` }}></div>

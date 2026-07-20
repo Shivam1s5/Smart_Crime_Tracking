@@ -7,8 +7,10 @@ from models import users_collection, complaints_collection, criminal_records_col
 from ml_clustering import calculate_risk_zones
 import os
 from dotenv import load_dotenv
-from datetime import datetime
+from datetime import datetime, timedelta
 from bson.objectid import ObjectId
+import cloudinary
+import cloudinary.uploader
 
 load_dotenv()
 
@@ -16,9 +18,17 @@ app = Flask(__name__)
 CORS(app)
 
 app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'super-secret-key-change-in-prod')
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=24)
 jwt = JWTManager(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 bcrypt = Bcrypt(app)
+
+# Cloudinary Config
+cloudinary.config(
+  cloud_name = os.environ.get('CLOUDINARY_CLOUD_NAME'),
+  api_key = os.environ.get('CLOUDINARY_API_KEY'),
+  api_secret = os.environ.get('CLOUDINARY_API_SECRET')
+)
 
 video_processor = None
 
@@ -140,20 +150,6 @@ def handle_connect():
 def handle_disconnect():
     print('Client disconnected')
 
-@app.route('/api/video/start', methods=['POST'])
-@jwt_required()
-def start_video():
-    claims = get_jwt()
-    if claims.get('role') not in ['Police', 'Admin']:
-        return jsonify({'message': 'Unauthorized'}), 403
-        
-    global video_processor
-    # if not video_processor:
-    #     # Use 0 for webcam or a video file path
-    #     video_processor = VideoProcessor(socketio, app, video_source=0) 
-    # video_processor.start()
-    return jsonify({"message": "Camera is currently disabled per user request"}), 200
-
 @app.route('/api/cameras', methods=['GET'])
 @jwt_required()
 def get_cameras():
@@ -209,20 +205,57 @@ def delete_camera(camera_id):
     else:
         return jsonify({'message': 'Camera not found'}), 404
 
+@app.route('/api/alerts', methods=['GET'])
+@jwt_required()
+def get_alerts():
+    claims = get_jwt()
+    if claims.get('role') not in ['Police', 'Admin']:
+        return jsonify({'message': 'Unauthorized'}), 403
+        
+    alerts = list(alerts_collection.find().sort('timestamp', -1).limit(50))
+    for a in alerts:
+        a['_id'] = str(a['_id'])
+        if isinstance(a.get('timestamp'), datetime):
+            a['timestamp'] = a['timestamp'].isoformat()
+    return jsonify(alerts), 200
+
+@app.route('/api/alerts/<alert_id>', methods=['DELETE'])
+@jwt_required()
+def delete_alert(alert_id):
+    claims = get_jwt()
+    if claims.get('role') not in ['Police', 'Admin']:
+        return jsonify({'message': 'Unauthorized'}), 403
+        
+    result = alerts_collection.delete_one({'_id': ObjectId(alert_id)})
+    if result.deleted_count == 1:
+        return jsonify({'message': 'Alert deleted successfully'}), 200
+    else:
+        return jsonify({'message': 'Alert not found'}), 404
+
 @app.route('/api/alerts/trigger', methods=['POST'])
 def trigger_alert():
-    # This endpoint is called by the AI Microservice
+    # This endpoint is called by the AI Microservice (or frontend now)
     data = request.get_json()
     
     if not data or 'camera_id' not in data:
         return jsonify({'error': 'Invalid payload'}), 400
         
+    image_base64 = data.get('image_base64')
+    image_url = data.get('image_url', '')
+    
+    if image_base64:
+        try:
+            upload_result = cloudinary.uploader.upload(image_base64, folder="smart_crime_tracking_alerts")
+            image_url = upload_result.get("secure_url")
+        except Exception as e:
+            print(f"Cloudinary Upload Error: {e}")
+            
     new_alert = {
         'camera_id': data.get('camera_id'),
         'area': data.get('area', 'Unknown'),
         'type': data.get('type', 'Weapon Detected'),
         'confidence': data.get('confidence', 0.0),
-        'image_url': data.get('image_url', ''),
+        'image_url': image_url,
         'timestamp': datetime.utcnow()
     }
     
