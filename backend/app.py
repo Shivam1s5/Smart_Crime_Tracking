@@ -193,7 +193,21 @@ def add_camera():
     cameras_collection.insert_one(new_camera)
     new_camera['_id'] = str(new_camera['_id'])
     
+    
     return jsonify({'message': 'Camera added successfully', 'camera': new_camera}), 201
+
+@app.route('/api/cameras/<camera_id>', methods=['DELETE'])
+@jwt_required()
+def delete_camera(camera_id):
+    claims = get_jwt()
+    if claims.get('role') not in ['Police', 'Admin']:
+        return jsonify({'message': 'Unauthorized'}), 403
+    
+    result = cameras_collection.delete_one({'camera_id': camera_id})
+    if result.deleted_count == 1:
+        return jsonify({'message': 'Camera deleted successfully'}), 200
+    else:
+        return jsonify({'message': 'Camera not found'}), 404
 
 @app.route('/api/alerts/trigger', methods=['POST'])
 def trigger_alert():

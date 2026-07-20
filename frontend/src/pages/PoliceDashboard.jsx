@@ -111,6 +111,18 @@ export default function PoliceDashboard() {
     }
   };
 
+  const handleRemoveCamera = async (cameraId) => {
+    try {
+      await axios.delete(`${import.meta.env.VITE_API_URL || 'https://smart-crime-tracking.onrender.com'}/api/cameras/${cameraId}`, {
+          headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+      });
+      setCameras(cameras.filter(c => c.camera_id !== cameraId));
+    } catch (err) {
+      console.error(err);
+      alert("Failed to remove camera.");
+    }
+  };
+
   const startVideoProcessing = async () => {
     try {
       setIsProcessing(true);
@@ -249,16 +261,18 @@ export default function PoliceDashboard() {
                     <div style={{ width: '100%', flex: 1, background: '#000', borderRadius: '4px', marginBottom: '8px', position: 'relative', overflow: 'hidden' }}>
                       <span style={{ position: 'absolute', top: 8, right: 8, background: 'red', color: 'white', fontSize: '0.7rem', padding: '3px 8px', borderRadius: '4px', fontWeight: 'bold', zIndex: 10, animation: 'pulse 2s infinite' }}>LIVE REC</span>
                       
+                      <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', display: 'flex', justifyContent: 'center', alignItems: 'center', color: 'var(--text-secondary)', zIndex: 1 }}>Camera Offline or Unreachable</div>
+                      
                       {cam.stream_url ? (
                         cam.stream_url.includes('youtube.com') ? (
-                          <iframe src={cam.stream_url} frameBorder="0" allow="autoplay; encrypted-media" style={{ width: '100%', height: '100%' }}></iframe>
+                          <iframe src={cam.stream_url} frameBorder="0" allow="autoplay; encrypted-media" style={{ width: '100%', height: '100%', position: 'relative', zIndex: 2 }}></iframe>
                         ) : (
-                          <img src={cam.stream_url} alt="Live Stream" style={{ width: '100%', height: '100%', objectFit: 'cover' }} 
-                            onError={(e) => { e.target.onerror = null; e.target.src = "https://placehold.co/400x200?text=Camera+Offline"; }}
+                          <img src={cam.stream_url} alt="Live Stream" style={{ width: '100%', height: '100%', objectFit: 'cover', position: 'relative', zIndex: 2 }} 
+                            onError={(e) => { e.target.onerror = null; e.target.style.display = 'none'; }}
                           />
                         )
                       ) : (
-                        <div style={{ width: '100%', height: '100%', display: 'flex', justifyContent: 'center', alignItems: 'center', color: 'var(--text-secondary)' }}>
+                        <div style={{ width: '100%', height: '100%', display: 'flex', justifyContent: 'center', alignItems: 'center', color: 'var(--text-secondary)', position: 'relative', zIndex: 2, background: '#000' }}>
                            No Stream Linked
                         </div>
                       )}
@@ -268,11 +282,19 @@ export default function PoliceDashboard() {
                         <strong style={{ display: 'block', fontSize: '1.05rem', color: 'var(--accent)' }}>{cam.name}</strong>
                         <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{cam.area}</span>
                       </div>
-                      {cam.lat && (
-                        <div style={{ fontSize: '0.75rem', textAlign: 'right', color: 'var(--text-secondary)' }}>
-                          {parseFloat(cam.lat).toFixed(4)}, {parseFloat(cam.lng).toFixed(4)}
-                        </div>
-                      )}
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px' }}>
+                        {cam.lat && (
+                          <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                            {parseFloat(cam.lat).toFixed(4)}, {parseFloat(cam.lng).toFixed(4)}
+                          </div>
+                        )}
+                        <button 
+                          onClick={() => handleRemoveCamera(cam.camera_id)}
+                          style={{ background: 'rgba(255,0,0,0.2)', color: '#ff4444', border: '1px solid rgba(255,0,0,0.4)', borderRadius: '4px', padding: '2px 6px', fontSize: '0.7rem', cursor: 'pointer' }}
+                        >
+                          Remove
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ))
