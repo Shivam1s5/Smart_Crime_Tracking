@@ -236,6 +236,58 @@ def trigger_alert():
     
     return jsonify({'message': 'Alert triggered successfully', 'alert': new_alert}), 201
 
+ai_monitoring_active = False
+
+def ai_monitoring_thread():
+    global ai_monitoring_active
+    import time
+    import random
+    
+    threat_types = ['Weapon Detected', 'Suspicious Activity', 'Violent Fight', 'Unauthorized Intrusion']
+    
+    while ai_monitoring_active:
+        # Sleep for a random interval between 10 and 20 seconds to simulate real-world AI processing
+        time.sleep(random.randint(10, 20))
+        
+        # Get a random active camera
+        cameras = list(cameras_collection.find({'status': 'Active'}))
+        if cameras:
+            cam = random.choice(cameras)
+            
+            new_alert = {
+                'camera_id': cam['camera_id'],
+                'area': cam['area'],
+                'type': random.choice(threat_types),
+                'confidence': round(random.uniform(0.75, 0.99), 2),
+                'image_url': '',
+                'timestamp': datetime.utcnow()
+            }
+            
+            # Save to db
+            alerts_collection.insert_one(new_alert)
+            new_alert['_id'] = str(new_alert['_id'])
+            new_alert['timestamp'] = new_alert['timestamp'].isoformat()
+            
+            # Broadcast alert to all clients
+            socketio.emit('red_alert', new_alert)
+
+@app.route('/api/video/start', methods=['POST'])
+@jwt_required()
+def start_video_processing():
+    global ai_monitoring_active
+    claims = get_jwt()
+    if claims.get('role') not in ['Police', 'Admin']:
+        return jsonify({'message': 'Unauthorized'}), 403
+        
+    if not ai_monitoring_active:
+        ai_monitoring_active = True
+        import threading
+        t = threading.Thread(target=ai_monitoring_thread, daemon=True)
+        t.start()
+        return jsonify({'message': 'AI Background Monitoring Started Successfully'}), 200
+    else:
+        return jsonify({'message': 'AI Monitoring is already running'}), 200
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     socketio.run(app, host='0.0.0.0', port=port, allow_unsafe_werkzeug=True)
