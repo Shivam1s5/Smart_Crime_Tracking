@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { io } from 'socket.io-client';
 import { useAuth } from '../context/AuthContext';
-import { ShieldAlert, LogOut, Video, Search, AlertTriangle, AlertOctagon, X, MapPin, Camera, Plus, CheckCircle } from 'lucide-react';
+import { ShieldAlert, LogOut, Video, Search, AlertTriangle, AlertOctagon, X, MapPin, Camera, Plus, CheckCircle, Trash2, Pause, Play, Maximize2 } from 'lucide-react';
 import * as tf from '@tensorflow/tfjs';
 import * as cocossd from '@tensorflow-models/coco-ssd';
 import * as poseDetection from '@tensorflow-models/pose-detection';
@@ -29,7 +29,10 @@ export default function PoliceDashboard() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [isProcessing, setIsProcessing] = useState(false);
+  const isProcessingRef = useRef(false);
   const [redAlert, setRedAlert] = useState(null);
+  const [selectedScreenshot, setSelectedScreenshot] = useState(null);
+  const [isCameraPaused, setIsCameraPaused] = useState(false);
   
   // Geolocation and Add Camera State
   const [policeLocation, setPoliceLocation] = useState({ lat: null, lng: null });
@@ -238,8 +241,10 @@ export default function PoliceDashboard() {
          }
          
          if (aiIntervalRef.current) clearInterval(aiIntervalRef.current);
+         isProcessingRef.current = true;
      
          aiIntervalRef.current = setInterval(async () => {
+         if (!isProcessingRef.current) return;
         if (laptopVideoRef.current && laptopVideoRef.current.readyState === 4) {
            const video = laptopVideoRef.current;
            const canvas = canvasRef.current;
@@ -278,7 +283,7 @@ export default function PoliceDashboard() {
                
                if (ctx) {
                    keypoints.forEach(k => {
-                       if (k.score > 0.25) {
+                       if (k.score > 0.65) {
                            ctx.beginPath();
                            ctx.arc(k.x, k.y, 6, 0, 2 * Math.PI);
                            ctx.fillStyle = '#00ffff';
@@ -294,10 +299,10 @@ export default function PoliceDashboard() {
                
                // Check if AT LEAST ONE wrist is raised above the shoulder (Fighting stance / punching)
                if (leftWrist && rightWrist && leftShoulder && rightShoulder) {
-                   const isLeftWristRaised = leftWrist.score > 0.25 && leftWrist.y < leftShoulder.y;
-                   const isRightWristRaised = rightWrist.score > 0.25 && rightWrist.y < rightShoulder.y;
+                   const isLeftWristRaised = leftWrist.score > 0.65 && leftWrist.y < leftShoulder.y;
+                   const isRightWristRaised = rightWrist.score > 0.65 && rightWrist.y < rightShoulder.y;
                    
-                   if (isLeftWristRaised || isRightWristRaised) {
+                   if ((isLeftWristRaised || isRightWristRaised) && (leftWrist.score > 0.65 || rightWrist.score > 0.65)) {
                        triggerRealAlert('Violence: Fighting Pose', Math.max(leftWrist.score, rightWrist.score));
                    }
                }
@@ -311,6 +316,7 @@ export default function PoliceDashboard() {
   };
 
   const stopVideoProcessing = () => {
+    isProcessingRef.current = false;
     if (aiIntervalRef.current) clearInterval(aiIntervalRef.current);
     const canvas = canvasRef.current;
     if (canvas) {
@@ -336,6 +342,21 @@ export default function PoliceDashboard() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', padding: '16px', gap: '16px', position: 'relative', overflowY: 'auto' }}>
       
+      {/* Screenshot Viewer Modal */}
+      {selectedScreenshot && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, width: '100%', height: '100%',
+          background: 'rgba(0,0,0,0.9)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 10000
+        }}>
+          <div style={{ position: 'relative', maxWidth: '90%', maxHeight: '90%' }}>
+            <button onClick={() => setSelectedScreenshot(null)} style={{ position: 'absolute', top: -40, right: 0, background: 'transparent', border: 'none', color: 'white', cursor: 'pointer' }}>
+              <X size={32} />
+            </button>
+            <img src={selectedScreenshot} alt="Evidence Fullscreen" style={{ maxWidth: '100%', maxHeight: '100%', borderRadius: '8px', border: '2px solid red' }} />
+          </div>
+        </div>
+      )}
+
       {/* RED ALERT OVERLAY */}
       {redAlert && (
         <div style={{
@@ -465,7 +486,26 @@ export default function PoliceDashboard() {
                 cameras.map((cam) => (
                   <div key={cam._id} style={{ minWidth: '400px', resize: 'both', overflow: 'hidden', background: 'rgba(255,255,255,0.05)', padding: '12px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)', display: 'flex', flexDirection: 'column' }}>
                     <div style={{ width: '100%', flex: 1, background: '#000', borderRadius: '4px', marginBottom: '8px', position: 'relative', overflow: 'hidden', minHeight: '200px' }}>
-                      <span style={{ position: 'absolute', top: 8, right: 8, background: 'red', color: 'white', fontSize: '0.7rem', padding: '3px 8px', borderRadius: '4px', fontWeight: 'bold', zIndex: 10, animation: 'pulse 2s infinite' }}>LIVE REC</span>
+                      <div style={{ position: 'absolute', top: 8, right: 8, zIndex: 10, display: 'flex', gap: '8px' }}>
+                          {cam.stream_url === 'LOCAL_WEBCAM' && (
+                              <button 
+                                onClick={() => {
+                                  if (laptopVideoRef.current) {
+                                    if (isCameraPaused) laptopVideoRef.current.play();
+                                    else laptopVideoRef.current.pause();
+                                    setIsCameraPaused(!isCameraPaused);
+                                  }
+                                }} 
+                                style={{ background: 'rgba(0,0,0,0.6)', border: 'none', color: 'white', padding: '4px', borderRadius: '4px', cursor: 'pointer', display: 'flex', alignItems: 'center' }}
+                              >
+                                {isCameraPaused ? <Play size={14} /> : <Pause size={14} />}
+                              </button>
+                          )}
+                          <button onClick={() => handleRemoveCamera(cam.camera_id)} style={{ background: 'rgba(255,0,0,0.8)', border: 'none', color: 'white', padding: '4px', borderRadius: '4px', cursor: 'pointer', display: 'flex', alignItems: 'center' }} title="Remove Camera">
+                              <Trash2 size={14} />
+                          </button>
+                          {!isCameraPaused && <span style={{ background: 'red', color: 'white', fontSize: '0.7rem', padding: '3px 8px', borderRadius: '4px', fontWeight: 'bold', animation: 'pulse 2s infinite' }}>LIVE REC</span>}
+                      </div>
                       
                       <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', display: 'flex', justifyContent: 'center', alignItems: 'center', color: 'var(--text-secondary)', zIndex: 1 }}>Camera Offline or Unreachable</div>
                       
@@ -499,12 +539,6 @@ export default function PoliceDashboard() {
                             {parseFloat(cam.lat).toFixed(4)}, {parseFloat(cam.lng).toFixed(4)}
                           </div>
                         )}
-                        <button 
-                          onClick={() => handleRemoveCamera(cam.camera_id)}
-                          style={{ background: 'rgba(255,0,0,0.2)', color: '#ff4444', border: '1px solid rgba(255,0,0,0.4)', borderRadius: '4px', padding: '2px 6px', fontSize: '0.7rem', cursor: 'pointer' }}
-                        >
-                          Remove
-                        </button>
                       </div>
                     </div>
                   </div>
@@ -580,7 +614,7 @@ export default function PoliceDashboard() {
               <p style={{ color: 'var(--text-secondary)', textAlign: 'center', marginTop: '40px' }}>No active threats detected.</p>
             ) : (
               alerts.map((alert, i) => (
-                <div key={i} className="alert-card animate-fade-in">
+                <div key={alert._id || i} className="alert-card animate-fade-in">
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
                     <strong style={{ color: 'var(--danger)' }}>{alert.type.toUpperCase()}</strong>
                     <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
@@ -593,9 +627,14 @@ export default function PoliceDashboard() {
                   <p style={{ margin: '0 0 8px 0', fontSize: '0.9rem' }}>Area: {alert.area}</p>
                   <p style={{ margin: '0 0 8px 0', fontSize: '0.9rem' }}>Cam: {alert.camera_id}</p>
                   
-                  {alert.image_url && (
-                      <div style={{ marginBottom: '8px', borderRadius: '4px', overflow: 'hidden', border: '1px solid rgba(255,0,0,0.3)' }}>
+                  {alert.image_url ? (
+                      <div style={{ marginBottom: '8px', borderRadius: '4px', overflow: 'hidden', border: '1px solid rgba(255,0,0,0.3)', position: 'relative', cursor: 'pointer' }} onClick={() => setSelectedScreenshot(alert.image_url)}>
+                          <div style={{ position: 'absolute', top: 4, right: 4, background: 'rgba(0,0,0,0.6)', padding: '2px', borderRadius: '4px', color: 'white' }}><Maximize2 size={14} /></div>
                           <img src={alert.image_url} alt="Crime Evidence" style={{ width: '100%', display: 'block' }} />
+                      </div>
+                  ) : (
+                      <div style={{ marginBottom: '8px', padding: '8px', borderRadius: '4px', background: 'rgba(255,0,0,0.1)', color: 'var(--danger)', fontSize: '0.8rem', textAlign: 'center', border: '1px solid rgba(255,0,0,0.2)' }}>
+                          Cloudinary Sync Failed: Image not saved. Add keys in Render.
                       </div>
                   )}
 
