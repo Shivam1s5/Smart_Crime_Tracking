@@ -5,6 +5,7 @@ import { useAuth } from '../context/AuthContext';
 import { ShieldAlert, LogOut, Video, Search, AlertTriangle, AlertOctagon, X, MapPin, Camera, Plus, CheckCircle } from 'lucide-react';
 import * as tf from '@tensorflow/tfjs';
 import * as cocossd from '@tensorflow-models/coco-ssd';
+import * as poseDetection from '@tensorflow-models/pose-detection';
 
 const LocalWebcam = React.forwardRef((props, ref) => {
   useEffect(() => {
@@ -38,6 +39,7 @@ export default function PoliceDashboard() {
   const [useLaptopCamera, setUseLaptopCamera] = useState(false);
   const laptopVideoRef = useRef(null);
   const [model, setModel] = useState(null);
+  const [poseModel, setPoseModel] = useState(null);
 
   useEffect(() => {
     // Detect Police Location
@@ -150,7 +152,7 @@ export default function PoliceDashboard() {
   };
 
   const triggerRealAlert = async (type, score) => {
-    if (window.lastAlertTime && Date.now() - window.lastAlertTime < 10000) return;
+    if (window.lastAlertTime && Date.now() - window.lastAlertTime < 8000) return;
     window.lastAlertTime = Date.now();
     
     const cam = cameras.find(c => c.stream_url === 'LOCAL_WEBCAM');
@@ -160,7 +162,7 @@ export default function PoliceDashboard() {
       await axios.post(`${import.meta.env.VITE_API_URL || 'https://smart-crime-tracking.onrender.com'}/api/alerts/trigger`, {
           camera_id: cam.camera_id,
           area: cam.area,
-          type: `Weapon/Threat Detected: ${type.toUpperCase()}`,
+          type: type.toUpperCase(),
           confidence: score,
           image_url: ''
       });
@@ -168,20 +170,50 @@ export default function PoliceDashboard() {
   };
 
   const runRealAI = async () => {
+     // 1. Load Object Detection Model
      let loadedModel = model;
      if (!loadedModel) {
         loadedModel = await cocossd.load();
         setModel(loadedModel);
      }
      
+     // 2. Load Pose Detection Model
+     let loadedPoseModel = poseModel;
+     if (!loadedPoseModel) {
+        const detectorConfig = {modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING};
+        loadedPoseModel = await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, detectorConfig);
+        setPoseModel(loadedPoseModel);
+     }
+     
      setInterval(async () => {
         if (laptopVideoRef.current && laptopVideoRef.current.readyState === 4) {
+           // A. Object Detection for Real Weapons
            const predictions = await loadedModel.detect(laptopVideoRef.current);
-           // We include 'cell phone' so the user can easily test it by holding up their phone like a weapon
-           const dangerousObjects = ['knife', 'baseball bat', 'cell phone', 'scissors', 'gun']; 
+           const dangerousObjects = ['knife', 'baseball bat', 'scissors', 'gun']; 
            for (let p of predictions) {
                if (dangerousObjects.includes(p.class) && p.score > 0.5) {
-                  triggerRealAlert(p.class, p.score);
+                  triggerRealAlert(`Weapon: ${p.class}`, p.score);
+               }
+           }
+           
+           // B. Pose Detection for Fighting/Violence
+           const poses = await loadedPoseModel.estimatePoses(laptopVideoRef.current);
+           if (poses.length > 0) {
+               const keypoints = poses[0].keypoints;
+               const leftWrist = keypoints.find(k => k.name === 'left_wrist');
+               const rightWrist = keypoints.find(k => k.name === 'right_wrist');
+               const leftShoulder = keypoints.find(k => k.name === 'left_shoulder');
+               const rightShoulder = keypoints.find(k => k.name === 'right_shoulder');
+               
+               // Check if wrists are visible and raised near or above shoulders (Guard up / Fighting pose)
+               // In image coordinates, y is 0 at the top, so lower y means higher up physically.
+               if (leftWrist && rightWrist && leftShoulder && rightShoulder) {
+                   const isLeftWristRaised = leftWrist.score > 0.4 && leftWrist.y < leftShoulder.y;
+                   const isRightWristRaised = rightWrist.score > 0.4 && rightWrist.y < rightShoulder.y;
+                   
+                   if (isLeftWristRaised && isRightWristRaised) {
+                       triggerRealAlert('Violence: Fighting Pose', Math.max(leftWrist.score, rightWrist.score));
+                   }
                }
            }
         }
