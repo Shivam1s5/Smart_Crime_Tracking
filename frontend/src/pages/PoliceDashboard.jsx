@@ -2,23 +2,24 @@ import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { io } from 'socket.io-client';
 import { useAuth } from '../context/AuthContext';
-import { ShieldAlert, LogOut, Video, Search, AlertTriangle, AlertOctagon, X, MapPin, Plus, Camera } from 'lucide-react';
+import { ShieldAlert, LogOut, Video, Search, AlertTriangle, AlertOctagon, X, MapPin, Camera, Plus, CheckCircle } from 'lucide-react';
+import * as tf from '@tensorflow/tfjs';
+import * as cocossd from '@tensorflow-models/coco-ssd';
 
-const LocalWebcam = () => {
-  const videoRef = useRef(null);
+const LocalWebcam = React.forwardRef((props, ref) => {
   useEffect(() => {
     navigator.mediaDevices.getUserMedia({ video: true })
       .then(stream => {
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
+        if (ref.current) {
+          ref.current.srcObject = stream;
         }
       })
       .catch(err => {
         console.error("Local webcam error", err);
       });
-  }, []);
-  return <video ref={videoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', position: 'relative', zIndex: 2 }} />;
-};
+  }, [ref]);
+  return <video ref={ref} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', position: 'relative', zIndex: 2 }} />;
+});
 
 export default function PoliceDashboard() {
   const { logout } = useAuth();
@@ -35,6 +36,8 @@ export default function PoliceDashboard() {
   const [showAddCameraModal, setShowAddCameraModal] = useState(false);
   const [newCameraData, setNewCameraData] = useState({ name: '', stream_url: '', location: '' });
   const [useLaptopCamera, setUseLaptopCamera] = useState(false);
+  const laptopVideoRef = useRef(null);
+  const [model, setModel] = useState(null);
 
   useEffect(() => {
     // Detect Police Location
@@ -146,12 +149,52 @@ export default function PoliceDashboard() {
     }
   };
 
+  const triggerRealAlert = async (type, score) => {
+    if (window.lastAlertTime && Date.now() - window.lastAlertTime < 10000) return;
+    window.lastAlertTime = Date.now();
+    
+    const cam = cameras.find(c => c.stream_url === 'LOCAL_WEBCAM');
+    if (!cam) return;
+    
+    try {
+      await axios.post(`${import.meta.env.VITE_API_URL || 'https://smart-crime-tracking.onrender.com'}/api/alerts/trigger`, {
+          camera_id: cam.camera_id,
+          area: cam.area,
+          type: `Weapon/Threat Detected: ${type.toUpperCase()}`,
+          confidence: score,
+          image_url: ''
+      });
+    } catch (e) { console.error("Error triggering real AI alert", e); }
+  };
+
+  const runRealAI = async () => {
+     let loadedModel = model;
+     if (!loadedModel) {
+        loadedModel = await cocossd.load();
+        setModel(loadedModel);
+     }
+     
+     setInterval(async () => {
+        if (laptopVideoRef.current && laptopVideoRef.current.readyState === 4) {
+           const predictions = await loadedModel.detect(laptopVideoRef.current);
+           // We include 'cell phone' so the user can easily test it by holding up their phone like a weapon
+           const dangerousObjects = ['knife', 'baseball bat', 'cell phone', 'scissors', 'gun']; 
+           for (let p of predictions) {
+               if (dangerousObjects.includes(p.class) && p.score > 0.5) {
+                  triggerRealAlert(p.class, p.score);
+               }
+           }
+        }
+     }, 1000); // Scan every 1 second
+  };
+
   const startVideoProcessing = async () => {
     try {
       setIsProcessing(true);
       await axios.post(`${import.meta.env.VITE_API_URL || 'https://smart-crime-tracking.onrender.com'}/api/video/start`, {}, {
           headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
       });
+      runRealAI();
     } catch (err) {
       console.error(err);
       setIsProcessing(false);
@@ -296,7 +339,7 @@ export default function PoliceDashboard() {
                       
                       {cam.stream_url ? (
                         cam.stream_url === 'LOCAL_WEBCAM' ? (
-                          <LocalWebcam />
+                          <LocalWebcam ref={laptopVideoRef} />
                         ) : cam.stream_url.includes('youtube.com') ? (
                           <iframe src={cam.stream_url} frameBorder="0" allow="autoplay; encrypted-media" style={{ width: '100%', height: '100%', position: 'relative', zIndex: 2 }}></iframe>
                         ) : (
