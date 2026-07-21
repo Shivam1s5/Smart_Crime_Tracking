@@ -226,11 +226,30 @@ def delete_alert(alert_id):
     if claims.get('role') not in ['Police', 'Admin']:
         return jsonify({'message': 'Unauthorized'}), 403
         
-    result = alerts_collection.delete_one({'_id': ObjectId(alert_id)})
-    if result.deleted_count == 1:
-        return jsonify({'message': 'Alert deleted successfully'}), 200
-    else:
+    alert = alerts_collection.find_one({'_id': ObjectId(alert_id)})
+    if not alert:
         return jsonify({'message': 'Alert not found'}), 404
+        
+    # Delete image from Cloudinary
+    if alert.get('public_id'):
+        try:
+            cloudinary.uploader.destroy(alert.get('public_id'))
+        except Exception as e:
+            print(f"Failed to delete from Cloudinary: {e}")
+    elif alert.get('image_url') and 'cloudinary.com' in alert.get('image_url'):
+        try:
+            url_parts = alert['image_url'].split('/upload/')
+            if len(url_parts) > 1:
+                path_part = url_parts[1]
+                if path_part.startswith('v') and '/' in path_part:
+                    path_part = path_part.split('/', 1)[1]
+                p_id = os.path.splitext(path_part)[0]
+                cloudinary.uploader.destroy(p_id)
+        except Exception as e:
+            print(f"Failed to delete from Cloudinary by URL: {e}")
+            
+    alerts_collection.delete_one({'_id': ObjectId(alert_id)})
+    return jsonify({'message': 'Alert deleted successfully'}), 200
 
 @app.route('/api/alerts/trigger', methods=['POST'])
 def trigger_alert():
@@ -243,10 +262,12 @@ def trigger_alert():
     image_base64 = data.get('image_base64')
     image_url = data.get('image_url', '')
     
+    public_id = None
     if image_base64:
         try:
             upload_result = cloudinary.uploader.upload(image_base64, folder="smart_crime_tracking_alerts")
             image_url = upload_result.get("secure_url")
+            public_id = upload_result.get("public_id")
         except Exception as e:
             print(f"Cloudinary Upload Error: {e}")
             
@@ -256,6 +277,7 @@ def trigger_alert():
         'type': data.get('type', 'Weapon Detected'),
         'confidence': data.get('confidence', 0.0),
         'image_url': image_url,
+        'public_id': public_id,
         'timestamp': datetime.utcnow()
     }
     
