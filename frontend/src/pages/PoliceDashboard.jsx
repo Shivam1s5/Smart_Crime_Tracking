@@ -281,30 +281,59 @@ export default function PoliceDashboard() {
            if (poses.length > 0) {
                const keypoints = poses[0].keypoints;
                
-               if (ctx) {
-                   keypoints.forEach(k => {
-                       if (k.score > 0.65) {
-                           ctx.beginPath();
-                           ctx.arc(k.x, k.y, 6, 0, 2 * Math.PI);
-                           ctx.fillStyle = '#00ffff';
-                           ctx.fill();
-                       }
-                   });
-               }
-
                const leftWrist = keypoints.find(k => k.name === 'left_wrist');
                const rightWrist = keypoints.find(k => k.name === 'right_wrist');
                const leftShoulder = keypoints.find(k => k.name === 'left_shoulder');
                const rightShoulder = keypoints.find(k => k.name === 'right_shoulder');
                
+               let isViolent = false;
+               let maxScore = 0;
+
                // Check if AT LEAST ONE wrist is raised above the shoulder (Fighting stance / punching)
                if (leftWrist && rightWrist && leftShoulder && rightShoulder) {
                    const isLeftWristRaised = leftWrist.score > 0.65 && leftWrist.y < leftShoulder.y;
                    const isRightWristRaised = rightWrist.score > 0.65 && rightWrist.y < rightShoulder.y;
                    
                    if ((isLeftWristRaised || isRightWristRaised) && (leftWrist.score > 0.65 || rightWrist.score > 0.65)) {
-                       triggerRealAlert('Violence: Fighting Pose', Math.max(leftWrist.score, rightWrist.score));
+                       isViolent = true;
+                       maxScore = Math.max(leftWrist.score, rightWrist.score);
+                       triggerRealAlert('Violence: Fighting Pose', maxScore);
                    }
+               }
+
+               if (ctx) {
+                   // Draw skeleton lines
+                   const connections = [
+                       ['nose', 'left_eye'], ['nose', 'right_eye'], ['left_eye', 'left_ear'], ['right_eye', 'right_ear'],
+                       ['left_shoulder', 'right_shoulder'], ['left_shoulder', 'left_elbow'], ['right_shoulder', 'right_elbow'],
+                       ['left_elbow', 'left_wrist'], ['right_elbow', 'right_wrist'], ['left_shoulder', 'left_hip'],
+                       ['right_shoulder', 'right_hip'], ['left_hip', 'right_hip'], ['left_hip', 'left_knee'],
+                       ['right_hip', 'right_knee'], ['left_knee', 'left_ankle'], ['right_knee', 'right_ankle']
+                   ];
+                   
+                   ctx.lineWidth = 4;
+                   ctx.strokeStyle = isViolent ? 'rgba(255, 0, 0, 0.8)' : 'rgba(255, 255, 255, 0.8)';
+                   
+                   connections.forEach(([p1Name, p2Name]) => {
+                       const p1 = keypoints.find(k => k.name === p1Name);
+                       const p2 = keypoints.find(k => k.name === p2Name);
+                       if (p1 && p2 && p1.score > 0.4 && p2.score > 0.4) {
+                           ctx.beginPath();
+                           ctx.moveTo(p1.x, p1.y);
+                           ctx.lineTo(p2.x, p2.y);
+                           ctx.stroke();
+                       }
+                   });
+
+                   // Draw keypoints
+                   keypoints.forEach(k => {
+                       if (k.score > 0.4) {
+                           ctx.beginPath();
+                           ctx.arc(k.x, k.y, 6, 0, 2 * Math.PI);
+                           ctx.fillStyle = isViolent ? '#ff0000' : '#ffffff';
+                           ctx.fill();
+                       }
+                   });
                }
            }
         }
