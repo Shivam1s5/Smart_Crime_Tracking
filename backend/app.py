@@ -25,9 +25,9 @@ bcrypt = Bcrypt(app)
 
 # Cloudinary Config
 cloudinary.config(
-  cloud_name = os.environ.get('CLOUDINARY_CLOUD_NAME'),
-  api_key = os.environ.get('CLOUDINARY_API_KEY'),
-  api_secret = os.environ.get('CLOUDINARY_API_SECRET')
+  cloud_name = os.environ.get('CLOUDINARY_CLOUD_NAME', 'dhkda169o'),
+  api_key = os.environ.get('CLOUDINARY_API_KEY', '744382239968817'),
+  api_secret = os.environ.get('CLOUDINARY_API_SECRET', 'L-sEHvzOSxh6pcOZnyt-WQMjphI')
 )
 
 video_processor = None

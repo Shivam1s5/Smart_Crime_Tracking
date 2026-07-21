@@ -202,6 +202,13 @@ export default function PoliceDashboard() {
       snapCanvas.height = video.videoHeight;
       const snapCtx = snapCanvas.getContext('2d');
       snapCtx.drawImage(video, 0, 0, snapCanvas.width, snapCanvas.height);
+      
+      // Merge AI Drawing Layer
+      const aiCanvas = canvasRef.current;
+      if (aiCanvas) {
+          snapCtx.drawImage(aiCanvas, 0, 0, snapCanvas.width, snapCanvas.height);
+      }
+      
       return snapCanvas.toDataURL('image/jpeg', 0.7); // 70% quality jpeg
     } catch (e) {
       console.error("Screenshot error", e);
