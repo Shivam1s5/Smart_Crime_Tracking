@@ -19,7 +19,7 @@ const LocalWebcam = React.forwardRef((props, ref) => {
         console.error("Local webcam error", err);
       });
   }, [ref]);
-  return <video ref={ref} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'fill', position: 'relative', zIndex: 2 }} />;
+  return <video ref={ref} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'contain', position: 'relative', zIndex: 2 }} />;
 });
 
 export default function PoliceDashboard() {
@@ -547,7 +547,7 @@ export default function PoliceDashboard() {
                         ) : cam.stream_url.includes('youtube.com') ? (
                           <iframe src={cam.stream_url} frameBorder="0" allow="autoplay; encrypted-media" style={{ width: '100%', height: '100%', position: 'relative', zIndex: 2 }}></iframe>
                         ) : (
-                          <img src={cam.stream_url} alt="Live Stream" style={{ width: '100%', height: '100%', objectFit: 'cover', position: 'relative', zIndex: 2 }} 
+                          <img src={cam.stream_url} alt="Live Stream" style={{ width: '100%', height: '100%', objectFit: 'contain', position: 'relative', zIndex: 2 }} 
                             onError={(e) => { e.target.onerror = null; e.target.style.display = 'none'; }}
                           />
                         )
