@@ -53,7 +53,11 @@ export default function PoliceDashboard() {
         await tf.ready();
         const loadedObject = await cocossd.load();
         setModel(loadedObject);
-        const detectorConfig = {modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING};
+        const detectorConfig = {
+          modelType: poseDetection.movenet.modelType.MULTIPOSE_LIGHTNING,
+          enableSmoothing: true,
+          minPoseScore: 0.15
+        };
         const loadedPose = await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, detectorConfig);
         setPoseModel(loadedPose);
       } catch (e) {
@@ -266,81 +270,553 @@ export default function PoliceDashboard() {
 
            // A. Object Detection for Real Weapons
            const predictions = await model.detect(video);
-           const dangerousObjects = ['knife', 'baseball bat', 'scissors', 'gun']; 
-           for (let p of predictions) {
-               if (ctx && p.score > 0.25) {
-                   ctx.beginPath();
-                   ctx.rect(...p.bbox);
-                   ctx.lineWidth = 3;
-                   ctx.strokeStyle = dangerousObjects.includes(p.class) ? '#ff0000' : '#00ff00';
-                   ctx.fillStyle = dangerousObjects.includes(p.class) ? '#ff0000' : '#00ff00';
-                   ctx.stroke();
-                   ctx.fillText(`${p.class} (${Math.round(p.score * 100)}%)`, p.bbox[0], p.bbox[1] > 20 ? p.bbox[1] - 5 : 20);
-               }
+           const dangerousObjects = ['knife', 'baseball bat', 'scissors', 'gun'];
+           const detectedWeapons = [];
 
-               if (dangerousObjects.includes(p.class) && p.score > 0.2) {
-                  triggerRealAlert(`Weapon: ${p.class}`, p.score);
+           for (let p of predictions) {
+               if (dangerousObjects.includes(p.class) && p.score >= 0.55) {
+                   detectedWeapons.push(p);
+                   if (ctx) {
+                       ctx.save();
+                       ctx.strokeStyle = '#ef4444';
+                       ctx.lineWidth = 3;
+                       ctx.shadowColor = '#ef4444';
+                       ctx.shadowBlur = 10;
+                       ctx.strokeRect(...p.bbox);
+
+                       ctx.fillStyle = 'rgba(239, 68, 68, 0.88)';
+                       const labelY = p.bbox[1] > 26 ? p.bbox[1] - 24 : p.bbox[1];
+                       ctx.fillRect(p.bbox[0], labelY, Math.max(p.bbox[2], 150), 22);
+
+                       ctx.fillStyle = '#ffffff';
+                       ctx.font = 'bold 12px sans-serif';
+                       ctx.fillText(`⚠️ WEAPON: ${p.class.toUpperCase()} (${Math.round(p.score * 100)}%)`, p.bbox[0] + 6, labelY + 16);
+                       ctx.restore();
+                   }
                }
            }
            
-           // B. Pose Detection for Fighting/Violence
-           const poses = await poseModel.estimatePoses(video);
-           if (poses.length > 0) {
-               const keypoints = poses[0].keypoints;
-               
-               const leftWrist = keypoints.find(k => k.name === 'left_wrist');
-               const rightWrist = keypoints.find(k => k.name === 'right_wrist');
-               const leftShoulder = keypoints.find(k => k.name === 'left_shoulder');
-               const rightShoulder = keypoints.find(k => k.name === 'right_shoulder');
-               
-               let isViolent = false;
-               let maxScore = 0;
+           // B. Multi-Person Pose Detection & Combat / Assault Analysis
+           const poses = await poseModel.estimatePoses(video, {
+               maxPoses: 6,
+               flipHorizontal: false
+           });
+           
+           // Filter all valid persons detected in the frame (score threshold 0.18 ensures all subjects get skeleton tracking)
+           const validPoses = (poses || []).filter(p => {
+               if (!p.keypoints) return false;
+               const highConfPoints = p.keypoints.filter(k => k.score > 0.18);
+               return (p.score && p.score > 0.15) || highConfPoints.length >= 3;
+           });
 
-               // Check if AT LEAST ONE wrist is raised above the shoulder (Fighting stance / punching)
-               if (leftWrist && rightWrist && leftShoulder && rightShoulder) {
-                   const isLeftWristRaised = leftWrist.score > 0.65 && leftWrist.y < leftShoulder.y;
-                   const isRightWristRaised = rightWrist.score > 0.65 && rightWrist.y < rightShoulder.y;
-                   
-                   if ((isLeftWristRaised || isRightWristRaised) && (leftWrist.score > 0.65 || rightWrist.score > 0.65)) {
-                       isViolent = true;
-                       maxScore = Math.max(leftWrist.score, rightWrist.score);
-                       triggerRealAlert('Violence: Fighting Pose', maxScore);
+           // Sort persons Left-to-Right for stable Person 1, Person 2... labeling
+           validPoses.sort((a, b) => {
+               const getX = (pose) => {
+                   if (pose.box && typeof pose.box.xMin === 'number') return pose.box.xMin;
+                   const nose = pose.keypoints.find(k => k.name === 'nose');
+                   if (nose && nose.score > 0.2) return nose.x;
+                   const shoulder = pose.keypoints.find(k => k.name === 'left_shoulder' || k.name === 'right_shoulder');
+                   if (shoulder && shoulder.score > 0.2) return shoulder.x;
+                   const first = pose.keypoints.find(k => k.score > 0.2);
+                   return first ? first.x : 0;
+               };
+               return getX(a) - getX(b);
+           });
+
+           // Build rich metadata for each detected subject
+           const personEntities = validPoses.map((p, idx) => {
+               const kpMap = {};
+               p.keypoints.forEach(k => { kpMap[k.name] = k; });
+
+               const nose = kpMap['nose'];
+               const leftShoulder = kpMap['left_shoulder'];
+               const rightShoulder = kpMap['right_shoulder'];
+               const leftElbow = kpMap['left_elbow'];
+               const rightElbow = kpMap['right_elbow'];
+               const leftWrist = kpMap['left_wrist'];
+               const rightWrist = kpMap['right_wrist'];
+
+               // Centroid & adaptive scale calculation
+               let centerX = 0, centerY = 0;
+               let shoulderWidth = 75;
+
+               if (leftShoulder && rightShoulder && leftShoulder.score > 0.25 && rightShoulder.score > 0.25) {
+                   centerX = (leftShoulder.x + rightShoulder.x) / 2;
+                   centerY = (leftShoulder.y + rightShoulder.y) / 2;
+                   shoulderWidth = Math.hypot(rightShoulder.x - leftShoulder.x, rightShoulder.y - leftShoulder.y);
+               } else if (nose && nose.score > 0.25) {
+                   centerX = nose.x;
+                   centerY = nose.y + 45;
+               } else {
+                   const validPts = p.keypoints.filter(k => k.score > 0.25);
+                   if (validPts.length > 0) {
+                       centerX = validPts.reduce((acc, k) => acc + k.x, 0) / validPts.length;
+                       centerY = validPts.reduce((acc, k) => acc + k.y, 0) / validPts.length;
                    }
                }
 
-               if (ctx) {
-                   // Draw skeleton lines
-                   const connections = [
-                       ['nose', 'left_eye'], ['nose', 'right_eye'], ['left_eye', 'left_ear'], ['right_eye', 'right_ear'],
-                       ['left_shoulder', 'right_shoulder'], ['left_shoulder', 'left_elbow'], ['right_shoulder', 'right_elbow'],
-                       ['left_elbow', 'left_wrist'], ['right_elbow', 'right_wrist'], ['left_shoulder', 'left_hip'],
-                       ['right_shoulder', 'right_hip'], ['left_hip', 'right_hip'], ['left_hip', 'left_knee'],
-                       ['right_hip', 'right_knee'], ['left_knee', 'left_ankle'], ['right_knee', 'right_ankle']
-                   ];
-                   
-                   ctx.lineWidth = 4;
-                   ctx.strokeStyle = isViolent ? 'rgba(255, 0, 0, 0.8)' : 'rgba(255, 255, 255, 0.8)';
-                   
-                   connections.forEach(([p1Name, p2Name]) => {
-                       const p1 = keypoints.find(k => k.name === p1Name);
-                       const p2 = keypoints.find(k => k.name === p2Name);
-                       if (p1 && p2 && p1.score > 0.4 && p2.score > 0.4) {
+               const headX = (nose && nose.score > 0.25) ? nose.x : centerX;
+               const headY = (nose && nose.score > 0.25) ? nose.y : (centerY - shoulderWidth * 0.45);
+
+               return {
+                   id: idx + 1,
+                   pose: p,
+                   keypoints: p.keypoints,
+                   kpMap,
+                   centerX,
+                   centerY,
+                   headX,
+                   headY,
+                   shoulderWidth: Math.max(shoulderWidth, 60),
+                   nose, leftShoulder, rightShoulder, leftElbow, rightElbow, leftWrist, rightWrist,
+                   state: 'NORMAL',
+                   statusLabel: 'Normal',
+                   threatScore: 0,
+                   strikingTargetId: null,
+                   strikingWrist: null,
+                   targetZone: '',
+                   armedWeapon: null
+               };
+           });
+
+           // Associate detected weapons with the closest person (high confidence only)
+           detectedWeapons.forEach(w => {
+               const [wX, wY, wW, wH] = w.bbox;
+               const wCenterX = wX + wW / 2;
+               const wCenterY = wY + wH / 2;
+
+               let closestPerson = null;
+               let minDist = Infinity;
+
+               personEntities.forEach(pe => {
+                   const dL = pe.leftWrist && pe.leftWrist.score > 0.3 ? Math.hypot(pe.leftWrist.x - wCenterX, pe.leftWrist.y - wCenterY) : Infinity;
+                   const dR = pe.rightWrist && pe.rightWrist.score > 0.3 ? Math.hypot(pe.rightWrist.x - wCenterX, pe.rightWrist.y - wCenterY) : Infinity;
+                   const dC = Math.hypot(pe.centerX - wCenterX, pe.centerY - wCenterY);
+                   const d = Math.min(dL, dR, dC);
+                   if (d < minDist) {
+                       minDist = d;
+                       closestPerson = pe;
+                   }
+               });
+
+               if (closestPerson && minDist < closestPerson.shoulderWidth * 1.8 && w.score >= 0.55) {
+                   closestPerson.state = 'ARMED';
+                   closestPerson.armedWeapon = w.class;
+                   closestPerson.statusLabel = `ARMED: ${w.class.toUpperCase()}`;
+                   closestPerson.threatScore = w.score;
+               }
+           });
+
+           // 1. Detect Dancing / Celebration / Peaceful Gestures to eliminate false alarms
+           personEntities.forEach(pe => {
+               if (pe.state !== 'ARMED') {
+                   const noseY = (pe.nose && pe.nose.score > 0.20) ? pe.nose.y : (pe.centerY - pe.shoulderWidth * 0.4);
+                   const leftWrist = pe.leftWrist;
+                   const rightWrist = pe.rightWrist;
+
+                   // Both hands high in the air above head level (classic dancing, waving, celebration)
+                   const leftHigh = leftWrist && leftWrist.score > 0.25 && leftWrist.y < noseY - 15;
+                   const rightHigh = rightWrist && rightWrist.score > 0.25 && rightWrist.y < noseY - 15;
+
+                   // Arms wide swaying overhead
+                   const armSpan = (leftWrist && rightWrist && leftWrist.score > 0.25 && rightWrist.score > 0.25)
+                       ? Math.abs(leftWrist.x - rightWrist.x) : 0;
+                   const wideArms = (leftHigh || rightHigh) && armSpan > pe.shoulderWidth * 1.25;
+
+                   // Single hand waving or pointing high overhead with no defensive or combat guard
+                   const singleHighWave = (leftHigh && (!rightWrist || rightWrist.y > pe.centerY)) ||
+                                          (rightHigh && (!leftWrist || leftWrist.y > pe.centerY));
+
+                   if ((leftHigh && rightHigh) || wideArms || singleHighWave) {
+                       pe.state = 'DANCING';
+                       pe.statusLabel = 'Dancing / Celebrating';
+                       pe.threatScore = 0;
+                   }
+               }
+           });
+
+           // 2. Detect Defensive Guard / Covering Face (e.g., person covering face or guarding head)
+           personEntities.forEach(pe => {
+               if (pe.state === 'NORMAL') {
+                   const checkCovering = (w) => w && w.score > 0.22 && Math.hypot(w.x - pe.headX, w.y - pe.headY) < pe.shoulderWidth * 0.75;
+                   if (checkCovering(pe.leftWrist) || checkCovering(pe.rightWrist)) {
+                       pe.state = 'DEFENDING';
+                       pe.statusLabel = 'Defending / Guarding';
+                       pe.threatScore = 0;
+                   }
+               }
+           });
+
+           // 3. Analyze Physical Strikes: Attacker extending fist into Target's head/torso
+           const strikes = [];
+
+           for (let i = 0; i < personEntities.length; i++) {
+               const p1 = personEntities[i];
+               for (let j = 0; j < personEntities.length; j++) {
+                   if (i === j) continue;
+                   const p2 = personEntities[j];
+
+                   // If either is clearly dancing/celebrating, do not classify as strike
+                   if (p1.state === 'DANCING' || p2.state === 'DANCING') continue;
+
+                   const avgScale = (p1.shoulderWidth + p2.shoulderWidth) / 2;
+
+                   const evaluateWristStrike = (wrist, shoulder) => {
+                       if (!wrist || wrist.score < 0.32) return null;
+
+                       // Self-touch check: closer to own body than target
+                       const distToOwnHead = Math.hypot(wrist.x - p1.headX, wrist.y - p1.headY);
+                       const distToTargetHead = Math.hypot(wrist.x - p2.headX, wrist.y - p2.headY);
+                       const distToOwnTorso = Math.hypot(wrist.x - p1.centerX, wrist.y - p1.centerY);
+                       const distToTargetTorso = Math.hypot(wrist.x - p2.centerX, wrist.y - p2.centerY);
+
+                       if (distToOwnHead < distToTargetHead && distToOwnTorso < distToTargetTorso) {
+                           return null; // Touching own face/chest
+                       }
+
+                       // Strike height: Upper body level
+                       const isAtHitHeight = wrist.y >= (p2.headY - 35) && wrist.y <= (p2.centerY + 65);
+                       if (!isAtHitHeight) return null;
+
+                       // Arm extension outward towards target
+                       const shoulderPt = shoulder || { x: p1.centerX, y: p1.centerY };
+                       const armExtension = Math.hypot(wrist.x - shoulderPt.x, wrist.y - shoulderPt.y);
+                       if (armExtension < p1.shoulderWidth * 0.50) return null;
+
+                       // Proximity to victim's vital points
+                       const strikeThreshold = Math.max(avgScale * 0.90, 75);
+
+                       if (distToTargetHead < strikeThreshold || distToTargetTorso < strikeThreshold) {
+                           return {
+                               targetZone: distToTargetHead <= distToTargetTorso ? 'Head' : 'Torso',
+                               wrist,
+                               confidence: Math.max(wrist.score, 0.78)
+                           };
+                       }
+                       return null;
+                   };
+
+                   const hit = evaluateWristStrike(p1.leftWrist, p1.leftShoulder) || 
+                               evaluateWristStrike(p1.rightWrist, p1.rightShoulder);
+
+                   if (hit) {
+                       strikes.push({
+                           attackerId: p1.id,
+                           victimId: p2.id,
+                           attackerWrist: hit.wrist,
+                           victimTarget: hit.targetZone === 'Head' ? { x: p2.headX, y: p2.headY } : { x: p2.centerX, y: p2.centerY },
+                           targetZone: hit.targetZone,
+                           confidence: hit.confidence
+                       });
+
+                       p1.state = 'AGGRESSOR';
+                       p1.statusLabel = `STRIKING Person #${p2.id} (${hit.targetZone})`;
+                       p1.strikingTargetId = p2.id;
+                       p1.strikingWrist = hit.wrist;
+                       p1.targetZone = hit.targetZone;
+                       p1.threatScore = Math.max(p1.threatScore, hit.confidence);
+
+                       if (p2.state !== 'AGGRESSOR' && p2.state !== 'ARMED') {
+                           p2.state = 'VICTIM';
+                           p2.statusLabel = `UNDER ATTACK by Person #${p1.id}`;
+                       }
+                   }
+               }
+           }
+
+           // 4. Fighting Pose & Combat Stance Detection (Directly addressing user feedback!)
+           personEntities.forEach(pe => {
+               if (pe.state === 'NORMAL' || pe.state === 'DEFENDING') {
+                   const noseY = (pe.nose && pe.nose.score > 0.20) ? pe.nose.y : (pe.centerY - pe.shoulderWidth * 0.4);
+                   const leftWrist = pe.leftWrist;
+                   const rightWrist = pe.rightWrist;
+
+                   // A wrist is at chin/chest height (classic guard/punch position between chin and chest)
+                   const isGuardHeight = (w) => w && w.score > 0.25 && w.y >= (noseY - 15) && w.y <= (pe.centerY + pe.shoulderWidth * 0.55);
+
+                   // Check both arms
+                   const leftInGuard = isGuardHeight(leftWrist);
+                   const rightInGuard = isGuardHeight(rightWrist);
+
+                   // Fists / hands raised in combat ready position
+                   // In boxing/street fight: both hands up in guard, OR one hand extended as punch/jab and other at chin
+                   const bothHandsUp = leftInGuard && rightInGuard;
+                   const oneHandLeadPunch = (leftInGuard && (!rightWrist || rightWrist.score < 0.25)) ||
+                                            (rightInGuard && (!leftWrist || leftWrist.score < 0.25));
+
+                   if (bothHandsUp || oneHandLeadPunch) {
+                       // Check if another person is present in interactive combat range (< 3.6 * shoulderWidth)
+                       const nearbyOther = personEntities.find(other => other.id !== pe.id && 
+                           Math.hypot(pe.centerX - other.centerX, pe.centerY - other.centerY) < Math.max(pe.shoulderWidth, other.shoulderWidth) * 3.6);
+
+                       if (nearbyOther) {
+                           pe.state = 'COMBAT_POSE';
+                           pe.statusLabel = `🥊 Combat Stance (vs Person #${nearbyOther.id})`;
+                           pe.threatScore = 0.85; // High priority threat!
+                       } else {
+                           pe.state = 'COMBAT_POSE';
+                           pe.statusLabel = '🥊 Fighting Posture / Guard';
+                           pe.threatScore = 0.78; // Threat detected!
+                       }
+                   }
+               }
+           });
+
+           // 5. Mutual Brawl Detection (Multiple subjects aggressively engaging)
+           const brawls = [];
+           for (let i = 0; i < personEntities.length; i++) {
+               for (let j = i + 1; j < personEntities.length; j++) {
+                   const p1 = personEntities[i];
+                   const p2 = personEntities[j];
+
+                   if (p1.state === 'DANCING' || p2.state === 'DANCING') continue;
+
+                   const distCenters = Math.hypot(p1.centerX - p2.centerX, p1.centerY - p2.centerY);
+                   const avgScale = (p1.shoulderWidth + p2.shoulderWidth) / 2;
+
+                   if ((p1.strikingTargetId === p2.id && p2.strikingTargetId === p1.id) ||
+                       (distCenters < avgScale * 2.2 && p1.state === 'COMBAT_POSE' && (p2.state === 'COMBAT_POSE' || p2.state === 'DEFENDING'))) {
+                       p1.state = 'BRAWL';
+                       p2.state = 'BRAWL';
+                       p1.statusLabel = `BRAWLING with Person #${p2.id}`;
+                       p2.statusLabel = `BRAWLING with Person #${p1.id}`;
+                       p1.threatScore = Math.max(p1.threatScore, 0.90);
+                       p2.threatScore = Math.max(p2.threatScore, 0.90);
+                       brawls.push({ p1: p1.id, p2: p2.id });
+                   }
+               }
+           }
+
+           // 6. Real-time Threat Prioritization & Alert Dispatch
+           let primaryAlertMsg = null;
+           let maxConfidence = 0;
+
+           const armedPerson = personEntities.find(p => p.state === 'ARMED');
+           const brawlIncident = brawls.length > 0;
+           const combatPerson = personEntities.find(p => p.state === 'COMBAT_POSE');
+
+           if (armedPerson && armedPerson.threatScore >= 0.55) {
+               primaryAlertMsg = `Weapon Detected: Person #${armedPerson.id} holding ${armedPerson.armedWeapon}`;
+               maxConfidence = armedPerson.threatScore;
+           } else if (strikes.length > 0) {
+               const s = strikes[0];
+               primaryAlertMsg = `Assault: Person #${s.attackerId} striking Person #${s.victimId} (${s.targetZone})`;
+               maxConfidence = s.confidence;
+           } else if (brawlIncident) {
+               primaryAlertMsg = `Physical Brawl: Altercation between multiple subjects`;
+               maxConfidence = 0.90;
+           } else if (combatPerson && combatPerson.threatScore >= 0.75) {
+               primaryAlertMsg = `Hostile Threat: ${combatPerson.statusLabel}`;
+               maxConfidence = combatPerson.threatScore;
+           }
+
+           // Streak confirmation filter (2 cycles = ~0.4s) to eliminate momentary noise
+           if (primaryAlertMsg) {
+               window.activeThreatStreak = (window.activeThreatStreak || 0) + 1;
+           } else {
+               window.activeThreatStreak = 0;
+           }
+
+           // Trigger real alert to police dashboard & play sound
+           if (primaryAlertMsg && window.activeThreatStreak >= 2) {
+               triggerRealAlert(primaryAlertMsg, maxConfidence);
+           }
+
+           // Canvas Drawing: Skeletons, Keypoints, HUD Badges & Strike Vectors for EVERY Person
+           if (ctx) {
+               const SKELETON_CONNECTIONS = [
+                   ['nose', 'left_eye'], ['nose', 'right_eye'], ['left_eye', 'left_ear'], ['right_eye', 'right_ear'],
+                   ['left_shoulder', 'right_shoulder'], ['left_shoulder', 'left_elbow'], ['right_shoulder', 'right_elbow'],
+                   ['left_elbow', 'left_wrist'], ['right_elbow', 'right_wrist'], ['left_shoulder', 'left_hip'],
+                   ['right_shoulder', 'right_hip'], ['left_hip', 'right_hip'], ['left_hip', 'left_knee'],
+                   ['right_hip', 'right_knee'], ['left_knee', 'left_ankle'], ['right_knee', 'right_ankle']
+               ];
+
+               // 1. Draw each person's skeleton and status badge
+               personEntities.forEach(pe => {
+                   let themeColor = '#06b6d4'; // Cool Cyan (Normal)
+                   let glowColor = 'rgba(6, 182, 212, 0.4)';
+                   let badgeBg = 'rgba(15, 23, 42, 0.88)';
+                   let badgeBorder = '#06b6d4';
+                   let badgeIcon = '👤';
+
+                   if (pe.state === 'ARMED') {
+                       themeColor = '#dc2626';
+                       glowColor = 'rgba(220, 38, 38, 0.8)';
+                       badgeBg = 'rgba(153, 27, 27, 0.95)';
+                       badgeBorder = '#ef4444';
+                       badgeIcon = '🔪';
+                   } else if (pe.state === 'AGGRESSOR') {
+                       themeColor = '#ef4444'; // Bright Red
+                       glowColor = 'rgba(239, 68, 68, 0.9)';
+                       badgeBg = 'rgba(185, 28, 28, 0.95)';
+                       badgeBorder = '#ff0000';
+                       badgeIcon = '🥊';
+                   } else if (pe.state === 'VICTIM') {
+                       themeColor = '#f97316'; // Vibrant Orange
+                       glowColor = 'rgba(249, 115, 22, 0.8)';
+                       badgeBg = 'rgba(194, 65, 12, 0.95)';
+                       badgeBorder = '#fb923c';
+                       badgeIcon = '⚠️';
+                   } else if (pe.state === 'BRAWL') {
+                       themeColor = '#e11d48';
+                       glowColor = 'rgba(225, 29, 72, 0.9)';
+                       badgeBg = 'rgba(159, 18, 57, 0.95)';
+                       badgeBorder = '#f43f5e';
+                       badgeIcon = '⚔️';
+                   } else if (pe.state === 'COMBAT_POSE') {
+                       themeColor = '#f97316'; // Vibrant Combat Orange
+                       glowColor = 'rgba(249, 115, 22, 0.7)';
+                       badgeBg = 'rgba(194, 65, 12, 0.92)';
+                       badgeBorder = '#f97316';
+                       badgeIcon = '🥊';
+                   } else if (pe.state === 'DEFENDING') {
+                       themeColor = '#f59e0b'; // Amber Guard
+                       glowColor = 'rgba(245, 158, 11, 0.5)';
+                       badgeBg = 'rgba(180, 83, 9, 0.9)';
+                       badgeBorder = '#fbbf24';
+                       badgeIcon = '🛡️';
+                   } else if (pe.state === 'DANCING') {
+                       themeColor = '#06b6d4';
+                       glowColor = 'rgba(6, 182, 212, 0.4)';
+                       badgeBg = 'rgba(15, 23, 42, 0.88)';
+                       badgeBorder = '#06b6d4';
+                       badgeIcon = '🎵';
+                   }
+
+                   // Skeleton Lines (drawn for all subjects with score > 0.18)
+                   ctx.save();
+                   ctx.lineWidth = (pe.state === 'AGGRESSOR' || pe.state === 'ARMED' || pe.state === 'BRAWL' || pe.state === 'COMBAT_POSE') ? 4 : 2.5;
+                   ctx.strokeStyle = themeColor;
+                   ctx.shadowColor = glowColor;
+                   ctx.shadowBlur = (pe.state === 'AGGRESSOR' || pe.state === 'ARMED' || pe.state === 'COMBAT_POSE') ? 10 : 4;
+
+                   SKELETON_CONNECTIONS.forEach(([p1Name, p2Name]) => {
+                       const pt1 = pe.kpMap[p1Name];
+                       const pt2 = pe.kpMap[p2Name];
+                       if (pt1 && pt2 && pt1.score > 0.18 && pt2.score > 0.18) {
                            ctx.beginPath();
-                           ctx.moveTo(p1.x, p1.y);
-                           ctx.lineTo(p2.x, p2.y);
+                           ctx.moveTo(pt1.x, pt1.y);
+                           ctx.lineTo(pt2.x, pt2.y);
                            ctx.stroke();
                        }
                    });
 
-                   // Draw keypoints
-                   keypoints.forEach(k => {
-                       if (k.score > 0.4) {
+                   // Keypoints
+                   pe.keypoints.forEach(k => {
+                       if (k.score > 0.18) {
+                           const isFist = (k.name === 'left_wrist' || k.name === 'right_wrist');
                            ctx.beginPath();
-                           ctx.arc(k.x, k.y, 6, 0, 2 * Math.PI);
-                           ctx.fillStyle = isViolent ? '#ff0000' : '#ffffff';
+                           ctx.arc(k.x, k.y, (isFist && (pe.state === 'AGGRESSOR' || pe.state === 'COMBAT_POSE')) ? 7 : 4.5, 0, 2 * Math.PI);
+                           ctx.fillStyle = ((pe.state === 'AGGRESSOR' || pe.state === 'COMBAT_POSE') && isFist) ? '#ff0000' : themeColor;
                            ctx.fill();
+                           ctx.strokeStyle = '#ffffff';
+                           ctx.lineWidth = 1.5;
+                           ctx.stroke();
                        }
                    });
+                   ctx.restore();
+
+                   // HUD Nameplate above head
+                   ctx.save();
+                   ctx.font = 'bold 12px sans-serif';
+                   const fullBadgeText = `${badgeIcon} Person #${pe.id} • ${pe.statusLabel}`;
+                   const textWidth = ctx.measureText(fullBadgeText).width;
+                   const badgeW = textWidth + 18;
+                   const badgeH = 24;
+                   const badgeX = Math.max(10, Math.min(pe.headX - badgeW / 2, canvas.width - badgeW - 10));
+                   const badgeY = Math.max(10, pe.headY - 34);
+
+                   ctx.fillStyle = badgeBg;
+                   ctx.strokeStyle = badgeBorder;
+                   ctx.lineWidth = 1.5;
+                   ctx.beginPath();
+                   if (ctx.roundRect) {
+                       ctx.roundRect(badgeX, badgeY, badgeW, badgeH, 6);
+                   } else {
+                       ctx.rect(badgeX, badgeY, badgeW, badgeH);
+                   }
+                   ctx.fill();
+                   ctx.stroke();
+
+                   ctx.fillStyle = '#ffffff';
+                   ctx.fillText(fullBadgeText, badgeX + 9, badgeY + 16);
+                   ctx.restore();
+               });
+
+               // 2. Draw Strike Action Vectors between Attacker and Victim
+               strikes.forEach(s => {
+                   if (s.attackerWrist && s.victimTarget) {
+                       ctx.save();
+                       ctx.setLineDash([6, 4]);
+                       ctx.strokeStyle = '#ef4444';
+                       ctx.lineWidth = 3.5;
+                       ctx.shadowColor = '#ff0000';
+                       ctx.shadowBlur = 10;
+
+                       ctx.beginPath();
+                       ctx.moveTo(s.attackerWrist.x, s.attackerWrist.y);
+                       ctx.lineTo(s.victimTarget.x, s.victimTarget.y);
+                       ctx.stroke();
+
+                       // Impact circle on victim
+                       ctx.beginPath();
+                       ctx.arc(s.victimTarget.x, s.victimTarget.y, 14, 0, 2 * Math.PI);
+                       ctx.fillStyle = 'rgba(239, 68, 68, 0.4)';
+                       ctx.fill();
+                       ctx.strokeStyle = '#ff0000';
+                       ctx.lineWidth = 2;
+                       ctx.stroke();
+
+                       // Midpoint strike badge
+                       const midX = (s.attackerWrist.x + s.victimTarget.x) / 2;
+                       const midY = (s.attackerWrist.y + s.victimTarget.y) / 2;
+
+                       ctx.setLineDash([]);
+                       ctx.fillStyle = 'rgba(0, 0, 0, 0.88)';
+                       ctx.strokeStyle = '#ef4444';
+                       ctx.lineWidth = 1.5;
+                       const strikeLabel = `💥 STRIKE (${Math.round(s.confidence * 100)}%)`;
+                       ctx.font = 'bold 11px sans-serif';
+                       const strkW = ctx.measureText(strikeLabel).width + 12;
+
+                       ctx.beginPath();
+                       if (ctx.roundRect) ctx.roundRect(midX - strkW / 2, midY - 10, strkW, 20, 4);
+                       else ctx.rect(midX - strkW / 2, midY - 10, strkW, 20);
+                       ctx.fill();
+                       ctx.stroke();
+
+                       ctx.fillStyle = '#ff4444';
+                       ctx.fillText(strikeLabel, midX - strkW / 2 + 6, midY + 4);
+                       ctx.restore();
+                   }
+               });
+
+               // 3. Top Active Incident Banner on Canvas
+               if (primaryAlertMsg) {
+                   ctx.save();
+                   const bannerText = `🚨 THREAT DETECTED: ${primaryAlertMsg.toUpperCase()}`;
+                   ctx.font = 'bold 13px sans-serif';
+                   const bW = ctx.measureText(bannerText).width + 24;
+                   const bH = 28;
+                   const bX = (canvas.width - bW) / 2;
+                   const bY = 12;
+
+                   ctx.fillStyle = 'rgba(185, 28, 28, 0.92)';
+                   ctx.strokeStyle = '#ef4444';
+                   ctx.lineWidth = 2;
+                   ctx.shadowColor = '#ff0000';
+                   ctx.shadowBlur = 12;
+
+                   ctx.beginPath();
+                   if (ctx.roundRect) ctx.roundRect(bX, bY, bW, bH, 6);
+                   else ctx.rect(bX, bY, bW, bH);
+                   ctx.fill();
+                   ctx.stroke();
+
+                   ctx.fillStyle = '#ffffff';
+                   ctx.fillText(bannerText, bX + 12, bY + 19);
+                   ctx.restore();
                }
            }
         }
