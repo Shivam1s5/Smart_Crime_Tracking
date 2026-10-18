@@ -190,7 +190,7 @@ def add_camera():
         threshold = 5
 
     try:
-        sound_threshold = max(30, min(120, int(data.get('sound_threshold', 75))))
+        sound_threshold = max(1, int(data.get('sound_threshold', 75)))
     except (ValueError, TypeError):
         sound_threshold = 75
 
@@ -227,7 +227,7 @@ def update_camera(camera_id):
             pass
     if 'sound_threshold' in data:
         try:
-            update_fields['sound_threshold'] = max(30, min(120, int(data['sound_threshold'])))
+            update_fields['sound_threshold'] = max(1, int(data['sound_threshold']))
         except (ValueError, TypeError):
             pass
     if 'name' in data:

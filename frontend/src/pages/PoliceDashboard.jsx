@@ -309,7 +309,7 @@ export default function PoliceDashboard() {
         lat: policeLocation.lat,
         lng: policeLocation.lng,
         gathering_threshold: Math.max(1, parseInt(newCameraData.gathering_threshold, 10) || 5),
-        sound_threshold: Math.max(30, Math.min(120, parseInt(newCameraData.sound_threshold, 10) || 75))
+        sound_threshold: Math.max(1, parseInt(newCameraData.sound_threshold, 10) || 75)
       };
       await axios.post(`${import.meta.env.VITE_API_URL || 'https://smart-crime-tracking.onrender.com'}/api/cameras`, payload, {
           headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
@@ -328,8 +328,8 @@ export default function PoliceDashboard() {
     e.preventDefault();
     if (!editingCamera) return;
     try {
-      const gathering_threshold = Math.max(1, parseInt(editGatheringThresholdValue, 10));
-      const sound_threshold = Math.max(30, Math.min(120, parseInt(editSoundThresholdValue, 10)));
+      const gathering_threshold = Math.max(1, parseInt(editGatheringThresholdValue, 10) || 5);
+      const sound_threshold = Math.max(1, parseInt(editSoundThresholdValue, 10) || 75);
       await axios.put(`${import.meta.env.VITE_API_URL || 'https://smart-crime-tracking.onrender.com'}/api/cameras/${editingCamera.camera_id}`, {
         gathering_threshold,
         sound_threshold
@@ -1166,45 +1166,118 @@ export default function PoliceDashboard() {
             </p>
             <form onSubmit={handleUpdateThreshold} style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
               <div>
-                <label style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', fontSize: '0.9rem', color: '#cbd5e1' }}>
-                  <span>👥 Maximum Gathering Limit</span>
-                  <span style={{ color: 'var(--accent)', fontWeight: 'bold' }}>{editGatheringThresholdValue} Persons</span>
+                <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px', fontSize: '0.88rem', color: '#cbd5e1' }}>
+                  <span style={{ fontWeight: 600 }}>👥 Maximum Gathering Limit</span>
+                  <span style={{ fontSize: '0.76rem', color: 'var(--accent)', background: 'rgba(56, 189, 248, 0.1)', padding: '2px 8px', borderRadius: '4px', border: '1px solid rgba(56, 189, 248, 0.25)' }}>
+                    Operator Defined (No Limit)
+                  </span>
                 </label>
-                <input 
-                  type="range" 
-                  min="1" 
-                  max="50" 
-                  value={editGatheringThresholdValue} 
-                  onChange={(e) => setEditGatheringThresholdValue(e.target.value)} 
-                  style={{ width: '100%', accentColor: 'var(--accent)' }}
-                />
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: '#64748b', marginTop: '2px' }}>
-                  <span>1 Person</span>
-                  <span>25 Persons</span>
-                  <span>50 Persons</span>
+                <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                  <input 
+                    type="number" 
+                    min="1" 
+                    className="input-glass" 
+                    style={{ width: '100%', paddingRight: '80px', fontSize: '1.05rem', fontWeight: 'bold', color: 'var(--accent)', margin: 0 }}
+                    placeholder="Enter custom gathering limit..."
+                    value={editGatheringThresholdValue} 
+                    onChange={(e) => setEditGatheringThresholdValue(e.target.value)} 
+                    required
+                  />
+                  <span style={{ position: 'absolute', right: '12px', fontSize: '0.82rem', color: '#94a3b8', pointerEvents: 'none', fontWeight: 600 }}>
+                    Persons
+                  </span>
                 </div>
+                <div style={{ display: 'flex', gap: '6px', marginTop: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                  <span style={{ fontSize: '0.72rem', color: '#64748b' }}>Quick Set:</span>
+                  {[5, 10, 25, 50, 100, 250, 500].map(val => (
+                    <button
+                      key={val}
+                      type="button"
+                      onClick={() => setEditGatheringThresholdValue(val)}
+                      style={{
+                        background: Number(editGatheringThresholdValue) === val ? 'rgba(56, 189, 248, 0.25)' : 'rgba(255,255,255,0.06)',
+                        border: `1px solid ${Number(editGatheringThresholdValue) === val ? 'var(--accent)' : 'rgba(255,255,255,0.1)'}`,
+                        color: Number(editGatheringThresholdValue) === val ? 'var(--accent)' : '#94a3b8',
+                        borderRadius: '4px',
+                        padding: '2px 8px',
+                        fontSize: '0.72rem',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      {val}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => setEditGatheringThresholdValue(prev => Math.max(1, (parseInt(prev, 10) || 0) + 5))}
+                    style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', borderRadius: '4px', padding: '2px 8px', fontSize: '0.72rem', cursor: 'pointer' }}
+                  >
+                    +5
+                  </button>
+                </div>
+                <span style={{ fontSize: '0.76rem', color: 'var(--text-secondary)', display: 'block', marginTop: '4px' }}>
+                  Alert triggers when live person count on this camera exceeds this operator threshold.
+                </span>
               </div>
 
               <div>
-                <label style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', fontSize: '0.9rem', color: '#cbd5e1' }}>
-                  <span>🔊 Noise / Sound Limit</span>
-                  <span style={{ color: '#eab308', fontWeight: 'bold' }}>{editSoundThresholdValue} dB</span>
+                <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px', fontSize: '0.88rem', color: '#cbd5e1' }}>
+                  <span style={{ fontWeight: 600 }}>🔊 Noise / Sound Limit</span>
+                  <span style={{ fontSize: '0.76rem', color: '#eab308', background: 'rgba(234, 179, 8, 0.1)', padding: '2px 8px', borderRadius: '4px', border: '1px solid rgba(234, 179, 8, 0.25)' }}>
+                    Operator Defined (No Limit)
+                  </span>
                 </label>
-                <input 
-                  type="range" 
-                  min="30" 
-                  max="110" 
-                  value={editSoundThresholdValue} 
-                  onChange={(e) => setEditSoundThresholdValue(e.target.value)} 
-                  style={{ width: '100%', accentColor: '#eab308' }}
-                />
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: '#64748b', marginTop: '2px' }}>
-                  <span>45 dB (Quiet)</span>
-                  <span>75 dB (Street/Default)</span>
-                  <span>95 dB (High Distress)</span>
+                <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                  <input 
+                    type="number" 
+                    min="1" 
+                    className="input-glass" 
+                    style={{ width: '100%', paddingRight: '50px', fontSize: '1.05rem', fontWeight: 'bold', color: '#eab308', margin: 0 }}
+                    placeholder="Enter custom sound limit in dB..."
+                    value={editSoundThresholdValue} 
+                    onChange={(e) => setEditSoundThresholdValue(e.target.value)} 
+                    required
+                  />
+                  <span style={{ position: 'absolute', right: '12px', fontSize: '0.82rem', color: '#94a3b8', pointerEvents: 'none', fontWeight: 600 }}>
+                    dB
+                  </span>
+                </div>
+                <div style={{ display: 'flex', gap: '6px', marginTop: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                  <span style={{ fontSize: '0.72rem', color: '#64748b' }}>Presets:</span>
+                  {[
+                    { label: '50 (Quiet)', val: 50 },
+                    { label: '75 (Normal)', val: 75 },
+                    { label: '85 (Crowd)', val: 85 },
+                    { label: '95 (Distress)', val: 95 },
+                    { label: '110 (Loud)', val: 110 }
+                  ].map(p => (
+                    <button
+                      key={p.val}
+                      type="button"
+                      onClick={() => setEditSoundThresholdValue(p.val)}
+                      style={{
+                        background: Number(editSoundThresholdValue) === p.val ? 'rgba(234, 179, 8, 0.25)' : 'rgba(255,255,255,0.06)',
+                        border: `1px solid ${Number(editSoundThresholdValue) === p.val ? '#eab308' : 'rgba(255,255,255,0.1)'}`,
+                        color: Number(editSoundThresholdValue) === p.val ? '#eab308' : '#94a3b8',
+                        borderRadius: '4px',
+                        padding: '2px 8px',
+                        fontSize: '0.72rem',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => setEditSoundThresholdValue(prev => Math.max(1, (parseInt(prev, 10) || 0) + 5))}
+                    style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', borderRadius: '4px', padding: '2px 8px', fontSize: '0.72rem', cursor: 'pointer' }}
+                  >
+                    +5 dB
+                  </button>
                 </div>
                 <span style={{ fontSize: '0.76rem', color: 'var(--text-secondary)', display: 'block', marginTop: '4px' }}>
-                  Automatic alert triggers if noise stays above {editSoundThresholdValue} dB for more than 1.5 seconds.
+                  Automatic alert triggers if noise stays above {editSoundThresholdValue || 0} dB for more than 1.5 seconds.
                 </span>
               </div>
 
@@ -1250,18 +1323,18 @@ export default function PoliceDashboard() {
               <div>
                 <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem' }}>Max Gathering Limit (Persons)</label>
                 <input 
-                  type="number" min="1" max="50" className="input-glass" required
+                  type="number" min="1" className="input-glass" required placeholder="e.g. 5, 25, 100 (Operator Defined)"
                   value={newCameraData.gathering_threshold} onChange={e => setNewCameraData({...newCameraData, gathering_threshold: e.target.value})}
                 />
-                <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>Automatic alert will trigger if gathering exceeds this threshold.</span>
+                <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>Automatic alert will trigger if gathering exceeds this operator limit.</span>
               </div>
               <div>
                 <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem' }}>Sound / Noise Limit (dB)</label>
                 <input 
-                  type="number" min="30" max="110" className="input-glass" required
+                  type="number" min="1" className="input-glass" required placeholder="e.g. 75, 85, 110 (Operator Defined)"
                   value={newCameraData.sound_threshold} onChange={e => setNewCameraData({...newCameraData, sound_threshold: e.target.value})}
                 />
-                <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>Default 75 dB. Alerts if sustained over 1.5 seconds.</span>
+                <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>Custom limit in dB. Alerts if sustained over 1.5 seconds.</span>
               </div>
               <div>
                 <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', color: 'white', marginBottom: '8px' }}>
