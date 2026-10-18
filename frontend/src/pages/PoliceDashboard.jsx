@@ -41,6 +41,7 @@ export default function PoliceDashboard() {
   const [showEditThresholdModal, setShowEditThresholdModal] = useState(false);
   const [editingCamera, setEditingCamera] = useState(null);
   const [editThresholdValue, setEditThresholdValue] = useState(5);
+  const [cameraSizePreset, setCameraSizePreset] = useState('standard');
 
   // Geolocation and Add Camera State
   const [policeLocation, setPoliceLocation] = useState({ lat: null, lng: null });
@@ -1131,35 +1132,93 @@ export default function PoliceDashboard() {
       </div>
 
       {/* Main Content Grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: '3fr 1fr', gap: '16px', flex: 1, overflow: 'hidden' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '3fr 1fr', gap: '16px', flex: 1, alignItems: 'start' }}>
         
         {/* Left Column: Cameras & ML Controls */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', overflow: 'hidden' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
           
           {/* Top Half: Real-time Cameras */}
-          <div className="glass-panel animate-fade-in" style={{ padding: '16px', display: 'flex', flexDirection: 'column', flex: 1 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+          <div className="glass-panel animate-fade-in" style={{ padding: '16px', display: 'flex', flexDirection: 'column' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '10px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
                 <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <Video size={20} color="var(--accent)" /> Active Live Streams
                 </h3>
               </div>
-              <button className="btn-primary" style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', gap: '6px' }} onClick={() => setShowAddCameraModal(true)}>
-                <Plus size={18} /> Add Real Camera
-              </button>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                {/* Camera Size Presets */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '4px', background: 'rgba(255,255,255,0.06)', padding: '3px 8px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.1)' }}>
+                  <span style={{ fontSize: '0.74rem', color: '#94a3b8', marginRight: '4px' }}>Feed Size:</span>
+                  {[
+                    { id: 'compact', label: 'S (380p)' },
+                    { id: 'standard', label: 'M (480p)' },
+                    { id: 'wide', label: 'L (620p)' }
+                  ].map(p => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => setCameraSizePreset(p.id)}
+                      style={{
+                        background: cameraSizePreset === p.id ? 'var(--accent)' : 'transparent',
+                        color: cameraSizePreset === p.id ? '#090d16' : '#cbd5e1',
+                        border: 'none',
+                        borderRadius: '4px',
+                        padding: '3px 8px',
+                        fontSize: '0.72rem',
+                        fontWeight: 'bold',
+                        cursor: 'pointer',
+                        transition: 'all 0.15s ease'
+                      }}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+
+                <button className="btn-primary" style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', gap: '6px' }} onClick={() => setShowAddCameraModal(true)}>
+                  <Plus size={18} /> Add Real Camera
+                </button>
+              </div>
             </div>
             
-            <div style={{ display: 'flex', gap: '16px', overflowX: 'auto', paddingBottom: '8px', flex: 1 }}>
+            <div style={{ display: 'flex', gap: '16px', overflowX: 'auto', paddingBottom: '12px', alignItems: 'flex-start' }}>
               {cameras.length === 0 ? (
-                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', width: '100%', color: 'var(--text-secondary)' }}>
+                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', width: '100%', color: 'var(--text-secondary)', padding: '40px 0' }}>
                    <Camera size={48} style={{ opacity: 0.2, marginBottom: '16px' }} />
                    <p>No active cameras found.</p>
                    <p style={{ fontSize: '0.9rem' }}>Click "Add Real Camera" to deploy and link an IP stream.</p>
                  </div>
               ) : (
-                cameras.map((cam) => (
-                  <div key={cam._id} style={{ minWidth: '400px', resize: 'both', overflow: 'hidden', background: 'rgba(255,255,255,0.05)', padding: '12px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)', display: 'flex', flexDirection: 'column' }}>
-                    <div style={{ width: '100%', flex: 1, background: '#000', borderRadius: '4px', marginBottom: '8px', position: 'relative', overflow: 'hidden', minHeight: '200px' }}>
+                cameras.map((cam) => {
+                  const cardWidth = cameraSizePreset === 'compact' ? '380px' : cameraSizePreset === 'standard' ? '480px' : '620px';
+                  return (
+                    <div 
+                      key={cam._id} 
+                      style={{ 
+                        width: cardWidth,
+                        minWidth: '320px', 
+                        maxWidth: '100%',
+                        resize: 'horizontal', 
+                        overflow: 'hidden', 
+                        background: 'rgba(255,255,255,0.05)', 
+                        padding: '12px', 
+                        borderRadius: '8px', 
+                        border: '1px solid rgba(255,255,255,0.1)', 
+                        display: 'flex', 
+                        flexDirection: 'column',
+                        flexShrink: 0
+                      }}
+                    >
+                      <div style={{ 
+                        width: '100%', 
+                        aspectRatio: '16 / 9', 
+                        background: '#000', 
+                        borderRadius: '6px', 
+                        marginBottom: '8px', 
+                        position: 'relative', 
+                        overflow: 'hidden' 
+                      }}>
                       {/* Live Gathering Count Badge */}
                       <div style={{
                         position: 'absolute', top: 8, left: 8, zIndex: 10,
@@ -1268,8 +1327,9 @@ export default function PoliceDashboard() {
                       </button>
                     </div>
                   </div>
-                ))
-              )}
+                );
+              })
+            )}
             </div>
           </div>
 
