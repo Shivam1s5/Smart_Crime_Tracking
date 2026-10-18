@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { io } from 'socket.io-client';
 import { useAuth } from '../context/AuthContext';
-import { ShieldAlert, LogOut, Video, Search, AlertTriangle, AlertOctagon, X, MapPin, Camera, Plus, CheckCircle, Trash2, Pause, Play, Maximize2 } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { ShieldAlert, LogOut, Video, Search, AlertTriangle, AlertOctagon, X, MapPin, Camera, Plus, CheckCircle, Trash2, Pause, Play, Maximize2, Users, SlidersHorizontal, ShieldCheck } from 'lucide-react';
 import * as tf from '@tensorflow/tfjs';
 import * as cocossd from '@tensorflow-models/coco-ssd';
 import * as poseDetection from '@tensorflow-models/pose-detection';
@@ -23,7 +24,8 @@ const LocalWebcam = React.forwardRef((props, ref) => {
 });
 
 export default function PoliceDashboard() {
-  const { logout } = useAuth();
+  const { logout, user } = useAuth();
+  const navigate = useNavigate();
   const [alerts, setAlerts] = useState([]);
   const [cameras, setCameras] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
@@ -34,11 +36,17 @@ export default function PoliceDashboard() {
   const [selectedScreenshot, setSelectedScreenshot] = useState(null);
   const [isCameraPaused, setIsCameraPaused] = useState(false);
   
+  // Real-time Live Gathering State per camera
+  const [liveGatheringCounts, setLiveGatheringCounts] = useState({});
+  const [showEditThresholdModal, setShowEditThresholdModal] = useState(false);
+  const [editingCamera, setEditingCamera] = useState(null);
+  const [editThresholdValue, setEditThresholdValue] = useState(5);
+
   // Geolocation and Add Camera State
   const [policeLocation, setPoliceLocation] = useState({ lat: null, lng: null });
   const [policeAddress, setPoliceAddress] = useState('');
   const [showAddCameraModal, setShowAddCameraModal] = useState(false);
-  const [newCameraData, setNewCameraData] = useState({ name: '', stream_url: '', location: '' });
+  const [newCameraData, setNewCameraData] = useState({ name: '', stream_url: '', location: '', gathering_threshold: 5 });
   const [useLaptopCamera, setUseLaptopCamera] = useState(false);
   const laptopVideoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -108,6 +116,10 @@ export default function PoliceDashboard() {
       } catch (e) { }
     });
 
+    socket.on('camera_updated', (updatedCam) => {
+      setCameras((prev) => prev.map(c => c.camera_id === updatedCam.camera_id ? updatedCam : c));
+    });
+
     return () => socket.disconnect();
   }, []);
 
@@ -170,18 +182,38 @@ export default function PoliceDashboard() {
         stream_url: useLaptopCamera ? 'LOCAL_WEBCAM' : newCameraData.stream_url,
         area: newCameraData.location,
         lat: policeLocation.lat,
-        lng: policeLocation.lng
+        lng: policeLocation.lng,
+        gathering_threshold: Math.max(1, parseInt(newCameraData.gathering_threshold, 10) || 5)
       };
       await axios.post(`${import.meta.env.VITE_API_URL || 'https://smart-crime-tracking.onrender.com'}/api/cameras`, payload, {
           headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
       });
       setShowAddCameraModal(false);
-      setNewCameraData({ name: '', stream_url: '', location: '' });
+      setNewCameraData({ name: '', stream_url: '', location: '', gathering_threshold: 5 });
       setUseLaptopCamera(false);
       fetchCameras(); // Refresh cameras
     } catch (err) {
       console.error("Failed to add camera", err);
       alert("Failed to add camera. Check console.");
+    }
+  };
+
+  const handleUpdateThreshold = async (e) => {
+    e.preventDefault();
+    if (!editingCamera) return;
+    try {
+      const threshold = Math.max(1, parseInt(editThresholdValue, 10));
+      await axios.put(`${import.meta.env.VITE_API_URL || 'https://smart-crime-tracking.onrender.com'}/api/cameras/${editingCamera.camera_id}`, {
+        gathering_threshold: threshold
+      }, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+      });
+      setCameras(cameras.map(c => c.camera_id === editingCamera.camera_id ? { ...c, gathering_threshold: threshold } : c));
+      setShowEditThresholdModal(false);
+      setEditingCamera(null);
+    } catch (err) {
+      console.error("Failed to update gathering threshold:", err);
+      alert("Failed to update threshold.");
     }
   };
 
@@ -308,6 +340,22 @@ export default function PoliceDashboard() {
                const highConfPoints = p.keypoints.filter(k => k.score > 0.18);
                return (p.score && p.score > 0.15) || highConfPoints.length >= 3;
            });
+
+           // C. Live Crowd / Gathering Count & Threshold Breach Check
+           const detectedPersons = predictions.filter(p => p.class === 'person' && p.score >= 0.35);
+           const currentGatheringCount = Math.max(validPoses.length, detectedPersons.length);
+
+           const activeCam = cameras.find(c => c.stream_url === 'LOCAL_WEBCAM');
+           const gatheringThreshold = (activeCam && activeCam.gathering_threshold) ? activeCam.gathering_threshold : 5;
+
+           if (activeCam) {
+               setLiveGatheringCounts(prev => ({
+                   ...prev,
+                   [activeCam.camera_id]: currentGatheringCount
+               }));
+           }
+
+           const isOvercrowded = currentGatheringCount > gatheringThreshold;
 
            // Sort persons Left-to-Right for stable Person 1, Person 2... labeling
            validPoses.sort((a, b) => {
@@ -608,6 +656,9 @@ export default function PoliceDashboard() {
            } else if (combatPerson && combatPerson.threatScore >= 0.75) {
                primaryAlertMsg = `Hostile Threat: ${combatPerson.statusLabel}`;
                maxConfidence = combatPerson.threatScore;
+           } else if (isOvercrowded) {
+               primaryAlertMsg = `CROWD GATHERING LIMIT EXCEEDED (${currentGatheringCount}/${gatheringThreshold} People)`;
+               maxConfidence = 0.95;
            }
 
            // Streak confirmation filter (2 cycles = ~0.4s) to eliminate momentary noise
@@ -818,6 +869,34 @@ export default function PoliceDashboard() {
                    ctx.fillText(bannerText, bX + 12, bY + 19);
                    ctx.restore();
                }
+
+               // 4. Live Gathering Count HUD on Canvas
+               ctx.save();
+               const hudText = isOvercrowded
+                   ? `⚠️ OVERCROWDED: ${currentGatheringCount} PERSONS (SAFE LIMIT: ${gatheringThreshold})`
+                   : `👥 GATHERING: ${currentGatheringCount} / ${gatheringThreshold} PERSONS (NORMAL)`;
+               ctx.font = 'bold 12px sans-serif';
+               const hudW = ctx.measureText(hudText).width + 20;
+               const hudH = 26;
+               const hudX = 12;
+               const hudY = 12;
+
+               ctx.fillStyle = isOvercrowded ? 'rgba(220, 38, 38, 0.95)' : 'rgba(15, 23, 42, 0.88)';
+               ctx.strokeStyle = isOvercrowded ? '#ef4444' : '#06b6d4';
+               ctx.lineWidth = 1.5;
+               if (isOvercrowded) {
+                   ctx.shadowColor = '#ef4444';
+                   ctx.shadowBlur = 10;
+               }
+               ctx.beginPath();
+               if (ctx.roundRect) ctx.roundRect(hudX, hudY, hudW, hudH, 6);
+               else ctx.rect(hudX, hudY, hudW, hudH);
+               ctx.fill();
+               ctx.stroke();
+
+               ctx.fillStyle = '#ffffff';
+               ctx.fillText(hudText, hudX + 10, hudY + 17);
+               ctx.restore();
            }
         }
      }, 200); // Scan faster (every 200ms) for better UX
@@ -894,6 +973,51 @@ export default function PoliceDashboard() {
         </div>
       )}
 
+      {/* Edit Gathering Threshold Modal */}
+      {showEditThresholdModal && editingCamera && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, width: '100%', height: '100%',
+          background: 'rgba(0,0,0,0.8)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 10000
+        }}>
+          <div className="glass-panel" style={{ padding: '32px', width: '380px', background: 'rgba(15,23,42,0.95)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '12px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <SlidersHorizontal size={20} color="var(--accent)" /> Configure Gathering Limit
+              </h3>
+              <X size={20} style={{ cursor: 'pointer' }} onClick={() => setShowEditThresholdModal(false)} />
+            </div>
+            <p style={{ fontSize: '0.88rem', color: 'var(--text-secondary)', marginBottom: '16px' }}>
+              Set maximum permitted gathering density for <strong>{editingCamera.name}</strong> ({editingCamera.area}). An automatic red alert will trigger if person count exceeds this limit.
+            </p>
+            <form onSubmit={handleUpdateThreshold}>
+              <div style={{ marginBottom: '20px' }}>
+                <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem', color: '#cbd5e1' }}>
+                  Maximum Gathering Limit (Persons)
+                </label>
+                <input 
+                  type="number" 
+                  min="1" 
+                  max="50" 
+                  className="input-glass" 
+                  value={editThresholdValue} 
+                  onChange={(e) => setEditThresholdValue(e.target.value)} 
+                  required 
+                  style={{ width: '100%', padding: '12px', fontSize: '1.2rem', fontWeight: 'bold', color: 'var(--accent)' }}
+                />
+              </div>
+              <div style={{ display: 'flex', gap: '10px' }}>
+                <button type="submit" className="btn-primary" style={{ flex: 1, padding: '10px' }}>
+                  Save & Apply Limit
+                </button>
+                <button type="button" onClick={() => setShowEditThresholdModal(false)} style={{ background: 'transparent', border: '1px solid rgba(255,255,255,0.2)', color: '#fff', borderRadius: '6px', padding: '10px 16px', cursor: 'pointer' }}>
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Add Camera Modal */}
       {showAddCameraModal && (
         <div style={{
@@ -921,6 +1045,14 @@ export default function PoliceDashboard() {
                 />
               </div>
               <div>
+                <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem' }}>Max Gathering Limit (Persons)</label>
+                <input 
+                  type="number" min="1" max="50" className="input-glass" required
+                  value={newCameraData.gathering_threshold} onChange={e => setNewCameraData({...newCameraData, gathering_threshold: e.target.value})}
+                />
+                <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>Automatic alert will trigger if gathering exceeds this threshold.</span>
+              </div>
+              <div>
                 <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', color: 'white', marginBottom: '8px' }}>
                   <input type="checkbox" checked={useLaptopCamera} onChange={(e) => setUseLaptopCamera(e.target.checked)} style={{ width: '16px', height: '16px', accentColor: 'var(--accent)' }} />
                   Use my Laptop's built-in Webcam
@@ -946,26 +1078,56 @@ export default function PoliceDashboard() {
 
       {/* Top Navbar */}
       <div className="glass-panel" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 24px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
           <ShieldAlert color="var(--accent)" size={28} />
-          <h2 style={{ margin: 0, fontSize: '1.25rem' }}>Tactical Monitoring Command Center</h2>
+          <div>
+            <h2 style={{ margin: 0, fontSize: '1.25rem' }}>Tactical Monitoring Command Center</h2>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '3px' }}>
+              <span style={{ 
+                background: user?.role === 'Admin' ? 'rgba(56, 189, 248, 0.2)' : 'rgba(16, 185, 129, 0.2)', 
+                color: user?.role === 'Admin' ? '#38bdf8' : '#10b981', 
+                border: `1px solid ${user?.role === 'Admin' ? 'rgba(56, 189, 248, 0.4)' : 'rgba(16, 185, 129, 0.4)'}`, 
+                fontSize: '0.74rem', 
+                fontWeight: 'bold', 
+                padding: '2px 8px', 
+                borderRadius: '4px' 
+              }}>
+                {user?.role === 'Admin' ? 'ADMINISTRATOR' : 'POLICE OPERATOR'}
+              </span>
+              <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                Live Crowd Gathering & Multi-Person Threat AI
+              </span>
+            </div>
+          </div>
         </div>
         
-        {/* Police GPS Location Display */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: 'rgba(255,255,255,0.05)', padding: '8px 16px', borderRadius: '20px' }}>
-          <MapPin size={18} color={policeLocation.lat ? "var(--success)" : "var(--text-secondary)"} />
-          <span style={{ fontSize: '0.9rem' }}>
-            {policeAddress
-              ? `${policeAddress}`
-              : policeLocation.lat 
-                ? 'Acquiring Address...' 
-                : 'Acquiring GPS Signal...'}
-          </span>
-        </div>
+        {/* Police GPS Location Display & Admin Switch */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: 'rgba(255,255,255,0.05)', padding: '8px 16px', borderRadius: '20px' }}>
+            <MapPin size={18} color={policeLocation.lat ? "var(--success)" : "var(--text-secondary)"} />
+            <span style={{ fontSize: '0.9rem' }}>
+              {policeAddress
+                ? `${policeAddress}`
+                : policeLocation.lat 
+                  ? 'Acquiring Address...' 
+                  : 'Acquiring GPS Signal...'}
+            </span>
+          </div>
 
-        <button onClick={logout} style={{ background: 'transparent', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <LogOut size={18} /> Logout
-        </button>
+          {user?.role === 'Admin' && (
+            <button 
+              onClick={() => navigate('/admin')}
+              className="btn-primary" 
+              style={{ padding: '8px 14px', fontSize: '0.84rem', display: 'flex', alignItems: 'center', gap: '6px', background: 'rgba(56, 189, 248, 0.15)', border: '1px solid rgba(56, 189, 248, 0.35)', color: '#38bdf8' }}
+            >
+              <ShieldCheck size={16} /> Admin Portal
+            </button>
+          )}
+
+          <button onClick={logout} style={{ background: 'transparent', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <LogOut size={18} /> Logout
+          </button>
+        </div>
       </div>
 
       {/* Main Content Grid */}
@@ -998,6 +1160,21 @@ export default function PoliceDashboard() {
                 cameras.map((cam) => (
                   <div key={cam._id} style={{ minWidth: '400px', resize: 'both', overflow: 'hidden', background: 'rgba(255,255,255,0.05)', padding: '12px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)', display: 'flex', flexDirection: 'column' }}>
                     <div style={{ width: '100%', flex: 1, background: '#000', borderRadius: '4px', marginBottom: '8px', position: 'relative', overflow: 'hidden', minHeight: '200px' }}>
+                      {/* Live Gathering Count Badge */}
+                      <div style={{
+                        position: 'absolute', top: 8, left: 8, zIndex: 10,
+                        background: (liveGatheringCounts[cam.camera_id] || 0) > (cam.gathering_threshold || 5) ? 'rgba(220, 38, 38, 0.95)' : 'rgba(15, 23, 42, 0.88)',
+                        border: `1px solid ${(liveGatheringCounts[cam.camera_id] || 0) > (cam.gathering_threshold || 5) ? '#ef4444' : 'rgba(56, 189, 248, 0.4)'}`,
+                        color: '#fff', fontSize: '0.74rem', fontWeight: 'bold', padding: '3px 8px',
+                        borderRadius: '6px', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', gap: '5px',
+                        boxShadow: (liveGatheringCounts[cam.camera_id] || 0) > (cam.gathering_threshold || 5) ? '0 0 10px #ef4444' : 'none'
+                      }}>
+                        <Users size={12} color={(liveGatheringCounts[cam.camera_id] || 0) > (cam.gathering_threshold || 5) ? '#fff' : '#38bdf8'} />
+                        <span>
+                          Gathering: {liveGatheringCounts[cam.camera_id] !== undefined ? liveGatheringCounts[cam.camera_id] : (cam.stream_url === 'LOCAL_WEBCAM' ? (isProcessing ? 0 : 'Idle') : '1')} / Limit: {cam.gathering_threshold || 5}
+                        </span>
+                      </div>
+
                       <div style={{ position: 'absolute', top: 8, right: 8, zIndex: 10, display: 'flex', gap: '8px' }}>
                           {cam.stream_url === 'LOCAL_WEBCAM' && (
                               <button 
@@ -1052,6 +1229,43 @@ export default function PoliceDashboard() {
                           </div>
                         )}
                       </div>
+                    </div>
+
+                    {/* Gathering Limit Controller Footer */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '8px', paddingTop: '8px', borderTop: '1px solid rgba(255,255,255,0.08)', width: '100%', justifyContent: 'space-between' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <span style={{ fontSize: '0.78rem', color: '#94a3b8' }}>Gathering Limit:</span>
+                        <span style={{ 
+                          fontSize: '0.8rem', 
+                          fontWeight: 'bold', 
+                          color: (liveGatheringCounts[cam.camera_id] || 0) > (cam.gathering_threshold || 5) ? '#ef4444' : '#38bdf8',
+                          background: (liveGatheringCounts[cam.camera_id] || 0) > (cam.gathering_threshold || 5) ? 'rgba(239, 68, 68, 0.15)' : 'rgba(56, 189, 248, 0.12)',
+                          padding: '2px 8px', borderRadius: '4px' 
+                        }}>
+                          {cam.gathering_threshold || 5} Persons
+                        </span>
+                      </div>
+                      <button 
+                        onClick={() => {
+                          setEditingCamera(cam);
+                          setEditThresholdValue(cam.gathering_threshold || 5);
+                          setShowEditThresholdModal(true);
+                        }}
+                        style={{
+                          background: 'rgba(255,255,255,0.06)',
+                          border: '1px solid rgba(255,255,255,0.18)',
+                          color: '#f8fafc',
+                          borderRadius: '4px',
+                          padding: '4px 8px',
+                          cursor: 'pointer',
+                          fontSize: '0.74rem',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '4px'
+                        }}
+                      >
+                        <SlidersHorizontal size={12} color="var(--accent)" /> Set Limit
+                      </button>
                     </div>
                   </div>
                 ))

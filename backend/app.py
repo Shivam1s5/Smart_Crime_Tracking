@@ -41,10 +41,14 @@ def register():
         if users_collection.find_one({'username': data.get('username')}):
             return jsonify({'message': 'Username already exists'}), 400
 
+        role = data.get('role', 'Police')
+        if role not in ['Police', 'Admin']:
+            role = 'Police'
+
         new_user = {
             'username': data.get('username'),
             'password_hash': hashed_pw,
-            'role': data.get('role', 'Citizen')
+            'role': role
         }
         users_collection.insert_one(new_user)
         
@@ -165,6 +169,8 @@ def get_cameras():
     cameras = list(cameras_collection.find(query))
     for c in cameras:
         c['_id'] = str(c['_id'])
+        if 'gathering_threshold' not in c:
+            c['gathering_threshold'] = 5
         
     return jsonify(cameras), 200
 
@@ -176,6 +182,11 @@ def add_camera():
         return jsonify({'message': 'Unauthorized'}), 403
     
     data = request.get_json()
+    try:
+        threshold = max(1, int(data.get('gathering_threshold', 5)))
+    except (ValueError, TypeError):
+        threshold = 5
+
     new_camera = {
         'camera_id': data.get('camera_id', f"CAM-{datetime.utcnow().timestamp()}"),
         'name': data.get('name'),
@@ -183,14 +194,51 @@ def add_camera():
         'stream_url': data.get('stream_url'),
         'lat': data.get('lat'),
         'lng': data.get('lng'),
+        'gathering_threshold': threshold,
         'status': 'Active'
     }
     
     cameras_collection.insert_one(new_camera)
     new_camera['_id'] = str(new_camera['_id'])
     
-    
     return jsonify({'message': 'Camera added successfully', 'camera': new_camera}), 201
+
+@app.route('/api/cameras/<camera_id>', methods=['PUT'])
+@jwt_required()
+def update_camera(camera_id):
+    claims = get_jwt()
+    if claims.get('role') not in ['Police', 'Admin']:
+        return jsonify({'message': 'Unauthorized'}), 403
+    
+    data = request.get_json() or {}
+    update_fields = {}
+    if 'gathering_threshold' in data:
+        try:
+            update_fields['gathering_threshold'] = max(1, int(data['gathering_threshold']))
+        except (ValueError, TypeError):
+            pass
+    if 'name' in data:
+        update_fields['name'] = data['name']
+    if 'area' in data:
+        update_fields['area'] = data['area']
+    if 'stream_url' in data:
+        update_fields['stream_url'] = data['stream_url']
+    if 'status' in data:
+        update_fields['status'] = data['status']
+
+    if not update_fields:
+        return jsonify({'message': 'No fields provided to update'}), 400
+
+    result = cameras_collection.update_one({'camera_id': camera_id}, {'$set': update_fields})
+    updated = cameras_collection.find_one({'camera_id': camera_id})
+    if updated:
+        updated['_id'] = str(updated['_id'])
+        if 'gathering_threshold' not in updated:
+            updated['gathering_threshold'] = 5
+        socketio.emit('camera_updated', updated)
+        return jsonify({'message': 'Camera updated successfully', 'camera': updated}), 200
+    else:
+        return jsonify({'message': 'Camera not found'}), 404
 
 @app.route('/api/cameras/<camera_id>', methods=['DELETE'])
 @jwt_required()
@@ -204,6 +252,18 @@ def delete_camera(camera_id):
         return jsonify({'message': 'Camera deleted successfully'}), 200
     else:
         return jsonify({'message': 'Camera not found'}), 404
+
+@app.route('/api/users', methods=['GET'])
+@jwt_required()
+def get_users():
+    claims = get_jwt()
+    if claims.get('role') != 'Admin':
+        return jsonify({'message': 'Unauthorized. Admin access required.'}), 403
+    
+    users = list(users_collection.find({}, {'password_hash': 0}))
+    for u in users:
+        u['_id'] = str(u['_id'])
+    return jsonify(users), 200
 
 @app.route('/api/alerts', methods=['GET'])
 @jwt_required()

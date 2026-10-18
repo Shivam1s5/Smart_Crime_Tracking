@@ -11,13 +11,13 @@ def seed_db():
     criminal_records_collection.delete_many({})
     incidents_collection.delete_many({})
 
+    print("Seeding Administrator User...")
+    admin_pw = bcrypt.generate_password_hash("admin123").decode('utf-8')
+    users_collection.insert_one({'username': 'admin', 'password_hash': admin_pw, 'role': 'Admin'})
+    
     print("Seeding Police User...")
     police_pw = bcrypt.generate_password_hash("police123").decode('utf-8')
     users_collection.insert_one({'username': 'police', 'password_hash': police_pw, 'role': 'Police'})
-    
-    print("Seeding Citizen User...")
-    citizen_pw = bcrypt.generate_password_hash("citizen123").decode('utf-8')
-    users_collection.insert_one({'username': 'citizen', 'password_hash': citizen_pw, 'role': 'Citizen'})
 
     print("Seeding Criminal Records...")
     records = [
@@ -26,12 +26,12 @@ def seed_db():
     ]
     criminal_records_collection.insert_many(records)
     
-    print("Seeding Cameras...")
+    print("Seeding Cameras with Gathering Thresholds...")
     cameras_collection.delete_many({})
     cameras = [
-        {'camera_id': 'CAM-001', 'area': 'Downtown', 'name': 'Main Street Junction', 'status': 'Active', 'rtsp_url': 'http://158.58.130.148/mjpg/video.mjpg'},
-        {'camera_id': 'CAM-002', 'area': 'North Side', 'name': 'North Park Gate', 'status': 'Active', 'rtsp_url': 'http://158.58.130.148/mjpg/video.mjpg'},
-        {'camera_id': 'CAM-003', 'area': 'Downtown', 'name': 'City Hall Entrance', 'status': 'Active', 'rtsp_url': 'http://158.58.130.148/mjpg/video.mjpg'}
+        {'camera_id': 'CAM-001', 'area': 'Downtown', 'name': 'Main Street Junction', 'status': 'Active', 'gathering_threshold': 5, 'stream_url': 'http://158.58.130.148/mjpg/video.mjpg'},
+        {'camera_id': 'CAM-002', 'area': 'North Side', 'name': 'North Park Gate', 'status': 'Active', 'gathering_threshold': 4, 'stream_url': 'http://158.58.130.148/mjpg/video.mjpg'},
+        {'camera_id': 'CAM-003', 'area': 'Downtown', 'name': 'City Hall Entrance', 'status': 'Active', 'gathering_threshold': 6, 'stream_url': 'http://158.58.130.148/mjpg/video.mjpg'}
     ]
     cameras_collection.insert_many(cameras)
 

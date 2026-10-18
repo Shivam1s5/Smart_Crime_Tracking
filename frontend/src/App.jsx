@@ -2,8 +2,8 @@ import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import Auth from './pages/Auth';
-import CitizenPortal from './pages/CitizenPortal';
 import PoliceDashboard from './pages/PoliceDashboard';
+import AdminDashboard from './pages/AdminDashboard';
 
 const PrivateRoute = ({ children, roles }) => {
   const { user } = useAuth();
@@ -21,14 +21,6 @@ function AppRoutes() {
     <Routes>
       <Route path="/auth" element={<Auth />} />
       <Route 
-        path="/citizen" 
-        element={
-          <PrivateRoute roles={['Citizen']}>
-            <CitizenPortal />
-          </PrivateRoute>
-        } 
-      />
-      <Route 
         path="/dashboard" 
         element={
           <PrivateRoute roles={['Police', 'Admin']}>
@@ -37,8 +29,24 @@ function AppRoutes() {
         } 
       />
       <Route 
+        path="/admin" 
+        element={
+          <PrivateRoute roles={['Admin']}>
+            <AdminDashboard />
+          </PrivateRoute>
+        } 
+      />
+      <Route 
         path="*" 
-        element={<Navigate to={user ? (user.role === 'Citizen' ? '/citizen' : '/dashboard') : '/auth'} />} 
+        element={
+          <Navigate 
+            to={
+              user 
+                ? (user.role === 'Admin' ? '/admin' : '/dashboard') 
+                : '/auth'
+            } 
+          />
+        } 
       />
     </Routes>
   );

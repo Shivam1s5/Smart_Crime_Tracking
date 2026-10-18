@@ -7,7 +7,7 @@ export default function Auth() {
   const [isLogin, setIsLogin] = useState(true);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [role, setRole] = useState('Citizen');
+  const [role, setRole] = useState('Police');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   
@@ -80,7 +80,6 @@ export default function Auth() {
               onChange={(e) => setRole(e.target.value)}
               style={{ backgroundColor: 'rgba(15,23,42,0.9)' }}
             >
-              <option value="Citizen">Citizen</option>
               <option value="Police">Police Operator</option>
               <option value="Admin">Administrator</option>
             </select>
