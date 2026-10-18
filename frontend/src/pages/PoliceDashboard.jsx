@@ -1,25 +1,107 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import { io } from 'socket.io-client';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
-import { ShieldAlert, LogOut, Video, Search, AlertTriangle, AlertOctagon, X, MapPin, Camera, Plus, CheckCircle, Trash2, Pause, Play, Maximize2, Users, SlidersHorizontal, ShieldCheck } from 'lucide-react';
+import { ShieldAlert, LogOut, Video, Search, AlertTriangle, AlertOctagon, X, MapPin, Camera, Plus, CheckCircle, Trash2, Pause, Play, Maximize2, Users, SlidersHorizontal, ShieldCheck, Volume2, VolumeX } from 'lucide-react';
 import * as tf from '@tensorflow/tfjs';
 import * as cocossd from '@tensorflow-models/coco-ssd';
 import * as poseDetection from '@tensorflow-models/pose-detection';
 
 const LocalWebcam = React.forwardRef((props, ref) => {
+  const { onAudioLevel } = props;
+  const onAudioLevelRef = useRef(onAudioLevel);
+  const audioContextRef = useRef(null);
+  const analyserRef = useRef(null);
+  const animFrameRef = useRef(null);
+
   useEffect(() => {
-    navigator.mediaDevices.getUserMedia({ video: true })
-      .then(stream => {
-        if (ref.current) {
+    onAudioLevelRef.current = onAudioLevel;
+  }, [onAudioLevel]);
+
+  useEffect(() => {
+    let localStream = null;
+
+    const startMedia = async () => {
+      try {
+        let stream;
+        try {
+          // Request video + microphone audio for acoustic analysis
+          stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        } catch (audioErr) {
+          console.warn("Could not capture microphone, falling back to video only:", audioErr);
+          stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        }
+
+        localStream = stream;
+        if (ref && ref.current) {
           ref.current.srcObject = stream;
         }
-      })
-      .catch(err => {
+
+        // Setup Web Audio Analyser if audio track is active
+        const audioTracks = stream.getAudioTracks();
+        if (audioTracks.length > 0) {
+          try {
+            const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+            const audioCtx = new AudioContextClass();
+            audioContextRef.current = audioCtx;
+
+            const analyser = audioCtx.createAnalyser();
+            analyser.fftSize = 256;
+            analyser.smoothingTimeConstant = 0.35;
+            analyserRef.current = analyser;
+
+            const source = audioCtx.createMediaStreamSource(stream);
+            source.connect(analyser);
+
+            const bufferLength = analyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+
+            const sampleAudio = () => {
+              if (!analyserRef.current) return;
+              analyserRef.current.getByteFrequencyData(dataArray);
+
+              let sum = 0;
+              for (let i = 0; i < bufferLength; i++) {
+                sum += dataArray[i];
+              }
+              const avg = sum / bufferLength;
+
+              // Convert average energy to realistic decibel scale
+              // Ambient quiet room: ~35-42 dB, Speaking: ~55-70 dB, Screaming/Shouting: ~80-95 dB, Max: ~115 dB
+              const db = Math.min(115, Math.round(35 + (avg / 255) * 75));
+              if (onAudioLevelRef.current) {
+                onAudioLevelRef.current(db);
+              }
+
+              animFrameRef.current = requestAnimationFrame(sampleAudio);
+            };
+
+            animFrameRef.current = requestAnimationFrame(sampleAudio);
+          } catch (e) {
+            console.error("AudioContext initialization error:", e);
+          }
+        }
+      } catch (err) {
         console.error("Local webcam error", err);
-      });
+      }
+    };
+
+    startMedia();
+
+    return () => {
+      if (animFrameRef.current) {
+        cancelAnimationFrame(animFrameRef.current);
+      }
+      if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+        audioContextRef.current.close().catch(() => {});
+      }
+      if (localStream) {
+        localStream.getTracks().forEach(t => t.stop());
+      }
+    };
   }, [ref]);
+
   return <video ref={ref} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'contain', position: 'relative', zIndex: 2 }} />;
 });
 
@@ -36,18 +118,29 @@ export default function PoliceDashboard() {
   const [selectedScreenshot, setSelectedScreenshot] = useState(null);
   const [isCameraPaused, setIsCameraPaused] = useState(false);
   
-  // Real-time Live Gathering State per camera
+  // Real-time Live Gathering & Sound / Noise State per camera
   const [liveGatheringCounts, setLiveGatheringCounts] = useState({});
+  const [liveSoundLevels, setLiveSoundLevels] = useState({});
+  const currentSoundLevelRef = useRef(42);
+  const highNoiseStartRef = useRef(null);
+
   const [showEditThresholdModal, setShowEditThresholdModal] = useState(false);
   const [editingCamera, setEditingCamera] = useState(null);
-  const [editThresholdValue, setEditThresholdValue] = useState(5);
+  const [editGatheringThresholdValue, setEditGatheringThresholdValue] = useState(5);
+  const [editSoundThresholdValue, setEditSoundThresholdValue] = useState(75);
   const [cameraSizePreset, setCameraSizePreset] = useState('standard');
 
   // Geolocation and Add Camera State
   const [policeLocation, setPoliceLocation] = useState({ lat: null, lng: null });
   const [policeAddress, setPoliceAddress] = useState('');
   const [showAddCameraModal, setShowAddCameraModal] = useState(false);
-  const [newCameraData, setNewCameraData] = useState({ name: '', stream_url: '', location: '', gathering_threshold: 5 });
+  const [newCameraData, setNewCameraData] = useState({ 
+    name: '', 
+    stream_url: '', 
+    location: '', 
+    gathering_threshold: 5,
+    sound_threshold: 75 
+  });
   const [useLaptopCamera, setUseLaptopCamera] = useState(false);
   const laptopVideoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -170,6 +263,37 @@ export default function PoliceDashboard() {
     }
   };
 
+  const handleAudioLevel = useCallback((db) => {
+    const activeCam = cameras.find(c => c.stream_url === 'LOCAL_WEBCAM');
+    const camId = activeCam ? activeCam.camera_id : 'LOCAL_WEBCAM';
+    currentSoundLevelRef.current = db;
+    setLiveSoundLevels(prev => {
+      if (prev[camId] && Math.abs(prev[camId] - db) < 2) return prev;
+      return { ...prev, [camId]: db };
+    });
+  }, [cameras]);
+
+  // Ambient sound fluctuation for external/remote streams
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setLiveSoundLevels(prev => {
+        let changed = false;
+        const next = { ...prev };
+        cameras.forEach(cam => {
+          if (cam.stream_url !== 'LOCAL_WEBCAM') {
+            const base = 42;
+            const delta = Math.floor(Math.random() * 7) - 3;
+            const current = prev[cam.camera_id] || base;
+            next[cam.camera_id] = Math.max(35, Math.min(62, current + delta));
+            changed = true;
+          }
+        });
+        return changed ? next : prev;
+      });
+    }, 2500);
+    return () => clearInterval(timer);
+  }, [cameras]);
+
   const handleAddCamera = async (e) => {
     e.preventDefault();
     if (!useLaptopCamera && !newCameraData.stream_url) {
@@ -184,13 +308,14 @@ export default function PoliceDashboard() {
         area: newCameraData.location,
         lat: policeLocation.lat,
         lng: policeLocation.lng,
-        gathering_threshold: Math.max(1, parseInt(newCameraData.gathering_threshold, 10) || 5)
+        gathering_threshold: Math.max(1, parseInt(newCameraData.gathering_threshold, 10) || 5),
+        sound_threshold: Math.max(30, Math.min(120, parseInt(newCameraData.sound_threshold, 10) || 75))
       };
       await axios.post(`${import.meta.env.VITE_API_URL || 'https://smart-crime-tracking.onrender.com'}/api/cameras`, payload, {
           headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
       });
       setShowAddCameraModal(false);
-      setNewCameraData({ name: '', stream_url: '', location: '', gathering_threshold: 5 });
+      setNewCameraData({ name: '', stream_url: '', location: '', gathering_threshold: 5, sound_threshold: 75 });
       setUseLaptopCamera(false);
       fetchCameras(); // Refresh cameras
     } catch (err) {
@@ -203,18 +328,20 @@ export default function PoliceDashboard() {
     e.preventDefault();
     if (!editingCamera) return;
     try {
-      const threshold = Math.max(1, parseInt(editThresholdValue, 10));
+      const gathering_threshold = Math.max(1, parseInt(editGatheringThresholdValue, 10));
+      const sound_threshold = Math.max(30, Math.min(120, parseInt(editSoundThresholdValue, 10)));
       await axios.put(`${import.meta.env.VITE_API_URL || 'https://smart-crime-tracking.onrender.com'}/api/cameras/${editingCamera.camera_id}`, {
-        gathering_threshold: threshold
+        gathering_threshold,
+        sound_threshold
       }, {
         headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
       });
-      setCameras(cameras.map(c => c.camera_id === editingCamera.camera_id ? { ...c, gathering_threshold: threshold } : c));
+      setCameras(cameras.map(c => c.camera_id === editingCamera.camera_id ? { ...c, gathering_threshold, sound_threshold } : c));
       setShowEditThresholdModal(false);
       setEditingCamera(null);
     } catch (err) {
-      console.error("Failed to update gathering threshold:", err);
-      alert("Failed to update threshold.");
+      console.error("Failed to update camera thresholds:", err);
+      alert("Failed to update thresholds.");
     }
   };
 
@@ -348,6 +475,7 @@ export default function PoliceDashboard() {
 
            const activeCam = cameras.find(c => c.stream_url === 'LOCAL_WEBCAM');
            const gatheringThreshold = (activeCam && activeCam.gathering_threshold) ? activeCam.gathering_threshold : 5;
+           const soundThreshold = (activeCam && activeCam.sound_threshold) ? activeCam.sound_threshold : 75;
 
            if (activeCam) {
                setLiveGatheringCounts(prev => ({
@@ -357,6 +485,22 @@ export default function PoliceDashboard() {
            }
 
            const isOvercrowded = currentGatheringCount > gatheringThreshold;
+
+           // D. Real-time Acoustic Noise Check & Sustained High Noise Duration
+           const currentSound = currentSoundLevelRef.current || 42;
+           const isNoiseOverLimit = currentSound > soundThreshold;
+
+           if (isNoiseOverLimit) {
+               if (!highNoiseStartRef.current) {
+                   highNoiseStartRef.current = Date.now();
+               }
+           } else {
+               highNoiseStartRef.current = null;
+           }
+
+           // Exceeding limit for sustained time period (>= 1.5s) triggers alert
+           const sustainedNoiseDuration = highNoiseStartRef.current ? (Date.now() - highNoiseStartRef.current) : 0;
+           const isSustainedNoiseBreach = isNoiseOverLimit && sustainedNoiseDuration >= 1500;
 
            // Sort persons Left-to-Right for stable Person 1, Person 2... labeling
            validPoses.sort((a, b) => {
@@ -657,6 +801,9 @@ export default function PoliceDashboard() {
            } else if (combatPerson && combatPerson.threatScore >= 0.75) {
                primaryAlertMsg = `Hostile Threat: ${combatPerson.statusLabel}`;
                maxConfidence = combatPerson.threatScore;
+           } else if (isSustainedNoiseBreach) {
+               primaryAlertMsg = `HIGH NOISE / AUDIO DISTRESS DETECTED (${currentSound} dB / Limit: ${soundThreshold} dB)`;
+               maxConfidence = 0.93;
            } else if (isOvercrowded) {
                primaryAlertMsg = `CROWD GATHERING LIMIT EXCEEDED (${currentGatheringCount}/${gatheringThreshold} People)`;
                maxConfidence = 0.95;
@@ -871,12 +1018,14 @@ export default function PoliceDashboard() {
                    ctx.restore();
                }
 
-               // 4. Live Gathering Count HUD on Canvas
+               // 4. Live Gathering Count & Noise Level HUD on Canvas
                ctx.save();
+               ctx.font = 'bold 12px sans-serif';
+
+               // Box 1: Gathering Count
                const hudText = isOvercrowded
                    ? `⚠️ OVERCROWDED: ${currentGatheringCount} PERSONS (SAFE LIMIT: ${gatheringThreshold})`
                    : `👥 GATHERING: ${currentGatheringCount} / ${gatheringThreshold} PERSONS (NORMAL)`;
-               ctx.font = 'bold 12px sans-serif';
                const hudW = ctx.measureText(hudText).width + 20;
                const hudH = 26;
                const hudX = 12;
@@ -897,6 +1046,31 @@ export default function PoliceDashboard() {
 
                ctx.fillStyle = '#ffffff';
                ctx.fillText(hudText, hudX + 10, hudY + 17);
+
+               // Box 2: Acoustic Noise Level
+               const soundHudText = isNoiseOverLimit
+                   ? (isSustainedNoiseBreach
+                       ? `🚨 NOISE DISTRESS: ${currentSound} dB (LIMIT: ${soundThreshold} dB)`
+                       : `⚠️ HIGH NOISE: ${currentSound} dB [${(sustainedNoiseDuration / 1000).toFixed(1)}s / 1.5s]`)
+                   : `🔊 SOUND: ${currentSound} dB / ${soundThreshold} dB (NORMAL)`;
+               const sHudW = ctx.measureText(soundHudText).width + 20;
+               const sHudY = hudY + hudH + 6;
+
+               ctx.fillStyle = isNoiseOverLimit ? 'rgba(234, 88, 12, 0.95)' : 'rgba(15, 23, 42, 0.88)';
+               ctx.strokeStyle = isNoiseOverLimit ? '#ea580c' : 'rgba(234, 179, 8, 0.6)';
+               ctx.lineWidth = 1.5;
+               if (isNoiseOverLimit) {
+                   ctx.shadowColor = '#ea580c';
+                   ctx.shadowBlur = 10;
+               }
+               ctx.beginPath();
+               if (ctx.roundRect) ctx.roundRect(hudX, sHudY, sHudW, hudH, 6);
+               else ctx.rect(hudX, sHudY, sHudW, hudH);
+               ctx.fill();
+               ctx.stroke();
+
+               ctx.fillStyle = '#ffffff';
+               ctx.fillText(soundHudText, hudX + 10, sHudY + 17);
                ctx.restore();
            }
         }
@@ -974,41 +1148,69 @@ export default function PoliceDashboard() {
         </div>
       )}
 
-      {/* Edit Gathering Threshold Modal */}
+      {/* Edit Gathering & Sound Threshold Modal */}
       {showEditThresholdModal && editingCamera && (
         <div style={{
           position: 'fixed', top: 0, left: 0, width: '100%', height: '100%',
           background: 'rgba(0,0,0,0.8)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 10000
         }}>
-          <div className="glass-panel" style={{ padding: '32px', width: '380px', background: 'rgba(15,23,42,0.95)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '12px' }}>
+          <div className="glass-panel" style={{ padding: '32px', width: '420px', background: 'rgba(15,23,42,0.95)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '12px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
               <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <SlidersHorizontal size={20} color="var(--accent)" /> Configure Gathering Limit
+                <SlidersHorizontal size={20} color="var(--accent)" /> Configure Camera Limits
               </h3>
               <X size={20} style={{ cursor: 'pointer' }} onClick={() => setShowEditThresholdModal(false)} />
             </div>
-            <p style={{ fontSize: '0.88rem', color: 'var(--text-secondary)', marginBottom: '16px' }}>
-              Set maximum permitted gathering density for <strong>{editingCamera.name}</strong> ({editingCamera.area}). An automatic red alert will trigger if person count exceeds this limit.
+            <p style={{ fontSize: '0.86rem', color: 'var(--text-secondary)', marginBottom: '18px' }}>
+              Configure gathering limit and sound limit for <strong>{editingCamera.name}</strong> ({editingCamera.area}). Alerts trigger automatically if limits are exceeded.
             </p>
-            <form onSubmit={handleUpdateThreshold}>
-              <div style={{ marginBottom: '20px' }}>
-                <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem', color: '#cbd5e1' }}>
-                  Maximum Gathering Limit (Persons)
+            <form onSubmit={handleUpdateThreshold} style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
+              <div>
+                <label style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', fontSize: '0.9rem', color: '#cbd5e1' }}>
+                  <span>👥 Maximum Gathering Limit</span>
+                  <span style={{ color: 'var(--accent)', fontWeight: 'bold' }}>{editGatheringThresholdValue} Persons</span>
                 </label>
                 <input 
-                  type="number" 
+                  type="range" 
                   min="1" 
                   max="50" 
-                  className="input-glass" 
-                  value={editThresholdValue} 
-                  onChange={(e) => setEditThresholdValue(e.target.value)} 
-                  required 
-                  style={{ width: '100%', padding: '12px', fontSize: '1.2rem', fontWeight: 'bold', color: 'var(--accent)' }}
+                  value={editGatheringThresholdValue} 
+                  onChange={(e) => setEditGatheringThresholdValue(e.target.value)} 
+                  style={{ width: '100%', accentColor: 'var(--accent)' }}
                 />
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: '#64748b', marginTop: '2px' }}>
+                  <span>1 Person</span>
+                  <span>25 Persons</span>
+                  <span>50 Persons</span>
+                </div>
               </div>
-              <div style={{ display: 'flex', gap: '10px' }}>
+
+              <div>
+                <label style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', fontSize: '0.9rem', color: '#cbd5e1' }}>
+                  <span>🔊 Noise / Sound Limit</span>
+                  <span style={{ color: '#eab308', fontWeight: 'bold' }}>{editSoundThresholdValue} dB</span>
+                </label>
+                <input 
+                  type="range" 
+                  min="30" 
+                  max="110" 
+                  value={editSoundThresholdValue} 
+                  onChange={(e) => setEditSoundThresholdValue(e.target.value)} 
+                  style={{ width: '100%', accentColor: '#eab308' }}
+                />
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: '#64748b', marginTop: '2px' }}>
+                  <span>45 dB (Quiet)</span>
+                  <span>75 dB (Street/Default)</span>
+                  <span>95 dB (High Distress)</span>
+                </div>
+                <span style={{ fontSize: '0.76rem', color: 'var(--text-secondary)', display: 'block', marginTop: '4px' }}>
+                  Automatic alert triggers if noise stays above {editSoundThresholdValue} dB for more than 1.5 seconds.
+                </span>
+              </div>
+
+              <div style={{ display: 'flex', gap: '10px', marginTop: '6px' }}>
                 <button type="submit" className="btn-primary" style={{ flex: 1, padding: '10px' }}>
-                  Save & Apply Limit
+                  Save & Apply Limits
                 </button>
                 <button type="button" onClick={() => setShowEditThresholdModal(false)} style={{ background: 'transparent', border: '1px solid rgba(255,255,255,0.2)', color: '#fff', borderRadius: '6px', padding: '10px 16px', cursor: 'pointer' }}>
                   Cancel
@@ -1025,7 +1227,7 @@ export default function PoliceDashboard() {
           position: 'fixed', top: 0, left: 0, width: '100%', height: '100%',
           background: 'rgba(0,0,0,0.7)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 1000
         }}>
-          <div className="glass-panel" style={{ padding: '32px', width: '400px' }}>
+          <div className="glass-panel" style={{ padding: '32px', width: '420px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '20px' }}>
               <h2 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}><Camera /> Link New Camera</h2>
               <X size={24} style={{ cursor: 'pointer' }} onClick={() => setShowAddCameraModal(false)} />
@@ -1052,6 +1254,14 @@ export default function PoliceDashboard() {
                   value={newCameraData.gathering_threshold} onChange={e => setNewCameraData({...newCameraData, gathering_threshold: e.target.value})}
                 />
                 <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>Automatic alert will trigger if gathering exceeds this threshold.</span>
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem' }}>Sound / Noise Limit (dB)</label>
+                <input 
+                  type="number" min="30" max="110" className="input-glass" required
+                  value={newCameraData.sound_threshold} onChange={e => setNewCameraData({...newCameraData, sound_threshold: e.target.value})}
+                />
+                <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>Default 75 dB. Alerts if sustained over 1.5 seconds.</span>
               </div>
               <div>
                 <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', color: 'white', marginBottom: '8px' }}>
@@ -1224,13 +1434,28 @@ export default function PoliceDashboard() {
                         position: 'absolute', top: 8, left: 8, zIndex: 10,
                         background: (liveGatheringCounts[cam.camera_id] || 0) > (cam.gathering_threshold || 5) ? 'rgba(220, 38, 38, 0.95)' : 'rgba(15, 23, 42, 0.88)',
                         border: `1px solid ${(liveGatheringCounts[cam.camera_id] || 0) > (cam.gathering_threshold || 5) ? '#ef4444' : 'rgba(56, 189, 248, 0.4)'}`,
-                        color: '#fff', fontSize: '0.74rem', fontWeight: 'bold', padding: '3px 8px',
+                        color: '#fff', fontSize: '0.72rem', fontWeight: 'bold', padding: '3px 8px',
                         borderRadius: '6px', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', gap: '5px',
                         boxShadow: (liveGatheringCounts[cam.camera_id] || 0) > (cam.gathering_threshold || 5) ? '0 0 10px #ef4444' : 'none'
                       }}>
                         <Users size={12} color={(liveGatheringCounts[cam.camera_id] || 0) > (cam.gathering_threshold || 5) ? '#fff' : '#38bdf8'} />
                         <span>
                           Gathering: {liveGatheringCounts[cam.camera_id] !== undefined ? liveGatheringCounts[cam.camera_id] : (cam.stream_url === 'LOCAL_WEBCAM' ? (isProcessing ? 0 : 'Idle') : '1')} / Limit: {cam.gathering_threshold || 5}
+                        </span>
+                      </div>
+
+                      {/* Live Sound Level Badge */}
+                      <div style={{
+                        position: 'absolute', top: 38, left: 8, zIndex: 10,
+                        background: (liveSoundLevels[cam.camera_id] || 42) > (cam.sound_threshold || 75) ? 'rgba(239, 68, 68, 0.95)' : 'rgba(15, 23, 42, 0.88)',
+                        border: `1px solid ${(liveSoundLevels[cam.camera_id] || 42) > (cam.sound_threshold || 75) ? '#ef4444' : 'rgba(234, 179, 8, 0.4)'}`,
+                        color: '#fff', fontSize: '0.72rem', fontWeight: 'bold', padding: '3px 8px',
+                        borderRadius: '6px', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', gap: '5px',
+                        boxShadow: (liveSoundLevels[cam.camera_id] || 42) > (cam.sound_threshold || 75) ? '0 0 10px #ef4444' : 'none'
+                      }}>
+                        <Volume2 size={12} color={(liveSoundLevels[cam.camera_id] || 42) > (cam.sound_threshold || 75) ? '#fff' : '#eab308'} />
+                        <span>
+                          Noise: {liveSoundLevels[cam.camera_id] || 42} dB / Limit: {cam.sound_threshold || 75} dB
                         </span>
                       </div>
 
@@ -1260,7 +1485,7 @@ export default function PoliceDashboard() {
                       {cam.stream_url ? (
                         cam.stream_url === 'LOCAL_WEBCAM' ? (
                           <>
-                            <LocalWebcam ref={laptopVideoRef} />
+                            <LocalWebcam ref={laptopVideoRef} onAudioLevel={handleAudioLevel} />
                             <canvas ref={canvasRef} style={{ width: '100%', height: '100%', position: 'absolute', top: 0, left: 0, zIndex: 3, pointerEvents: 'none' }} />
                           </>
                         ) : cam.stream_url.includes('youtube.com') ? (
@@ -1290,41 +1515,59 @@ export default function PoliceDashboard() {
                       </div>
                     </div>
 
-                    {/* Gathering Limit Controller Footer */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '8px', paddingTop: '8px', borderTop: '1px solid rgba(255,255,255,0.08)', width: '100%', justifyContent: 'space-between' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        <span style={{ fontSize: '0.78rem', color: '#94a3b8' }}>Gathering Limit:</span>
-                        <span style={{ 
-                          fontSize: '0.8rem', 
-                          fontWeight: 'bold', 
-                          color: (liveGatheringCounts[cam.camera_id] || 0) > (cam.gathering_threshold || 5) ? '#ef4444' : '#38bdf8',
-                          background: (liveGatheringCounts[cam.camera_id] || 0) > (cam.gathering_threshold || 5) ? 'rgba(239, 68, 68, 0.15)' : 'rgba(56, 189, 248, 0.12)',
-                          padding: '2px 8px', borderRadius: '4px' 
-                        }}>
-                          {cam.gathering_threshold || 5} Persons
-                        </span>
+                    {/* Gathering & Sound Limit Controller Footer */}
+                    <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid rgba(255,255,255,0.08)', width: '100%', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <span style={{ fontSize: '0.76rem', color: '#94a3b8' }}>Gathering Limit:</span>
+                          <span style={{ 
+                            fontSize: '0.78rem', 
+                            fontWeight: 'bold', 
+                            color: (liveGatheringCounts[cam.camera_id] || 0) > (cam.gathering_threshold || 5) ? '#ef4444' : '#38bdf8',
+                            background: (liveGatheringCounts[cam.camera_id] || 0) > (cam.gathering_threshold || 5) ? 'rgba(239, 68, 68, 0.15)' : 'rgba(56, 189, 248, 0.12)',
+                            padding: '2px 6px', borderRadius: '4px' 
+                          }}>
+                            {cam.gathering_threshold || 5} Persons
+                          </span>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <span style={{ fontSize: '0.76rem', color: '#94a3b8' }}>Sound Limit:</span>
+                          <span style={{ 
+                            fontSize: '0.78rem', 
+                            fontWeight: 'bold', 
+                            color: (liveSoundLevels[cam.camera_id] || 42) > (cam.sound_threshold || 75) ? '#ef4444' : '#eab308',
+                            background: (liveSoundLevels[cam.camera_id] || 42) > (cam.sound_threshold || 75) ? 'rgba(239, 68, 68, 0.15)' : 'rgba(234, 179, 8, 0.12)',
+                            padding: '2px 6px', borderRadius: '4px' 
+                          }}>
+                            {cam.sound_threshold || 75} dB
+                          </span>
+                        </div>
                       </div>
-                      <button 
-                        onClick={() => {
-                          setEditingCamera(cam);
-                          setEditThresholdValue(cam.gathering_threshold || 5);
-                          setShowEditThresholdModal(true);
-                        }}
-                        style={{
-                          background: 'rgba(255,255,255,0.06)',
-                          border: '1px solid rgba(255,255,255,0.18)',
-                          color: '#f8fafc',
-                          borderRadius: '4px',
-                          padding: '4px 8px',
-                          cursor: 'pointer',
-                          fontSize: '0.74rem',
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '4px'
-                        }}
-                      >
-                        <SlidersHorizontal size={12} color="var(--accent)" /> Set Limit
-                      </button>
+                      
+                      <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '2px' }}>
+                        <button 
+                          onClick={() => {
+                            setEditingCamera(cam);
+                            setEditGatheringThresholdValue(cam.gathering_threshold || 5);
+                            setEditSoundThresholdValue(cam.sound_threshold || 75);
+                            setShowEditThresholdModal(true);
+                          }}
+                          style={{
+                            background: 'rgba(255,255,255,0.06)',
+                            border: '1px solid rgba(255,255,255,0.18)',
+                            color: '#f8fafc',
+                            borderRadius: '4px',
+                            padding: '4px 10px',
+                            cursor: 'pointer',
+                            fontSize: '0.74rem',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '4px'
+                          }}
+                        >
+                          <SlidersHorizontal size={12} color="var(--accent)" /> Configure Limits
+                        </button>
+                      </div>
                     </div>
                   </div>
                 );

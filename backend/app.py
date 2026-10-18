@@ -171,6 +171,8 @@ def get_cameras():
         c['_id'] = str(c['_id'])
         if 'gathering_threshold' not in c:
             c['gathering_threshold'] = 5
+        if 'sound_threshold' not in c:
+            c['sound_threshold'] = 75
         
     return jsonify(cameras), 200
 
@@ -187,6 +189,11 @@ def add_camera():
     except (ValueError, TypeError):
         threshold = 5
 
+    try:
+        sound_threshold = max(30, min(120, int(data.get('sound_threshold', 75))))
+    except (ValueError, TypeError):
+        sound_threshold = 75
+
     new_camera = {
         'camera_id': data.get('camera_id', f"CAM-{datetime.utcnow().timestamp()}"),
         'name': data.get('name'),
@@ -195,6 +202,7 @@ def add_camera():
         'lat': data.get('lat'),
         'lng': data.get('lng'),
         'gathering_threshold': threshold,
+        'sound_threshold': sound_threshold,
         'status': 'Active'
     }
     
@@ -217,6 +225,11 @@ def update_camera(camera_id):
             update_fields['gathering_threshold'] = max(1, int(data['gathering_threshold']))
         except (ValueError, TypeError):
             pass
+    if 'sound_threshold' in data:
+        try:
+            update_fields['sound_threshold'] = max(30, min(120, int(data['sound_threshold'])))
+        except (ValueError, TypeError):
+            pass
     if 'name' in data:
         update_fields['name'] = data['name']
     if 'area' in data:
@@ -235,6 +248,8 @@ def update_camera(camera_id):
         updated['_id'] = str(updated['_id'])
         if 'gathering_threshold' not in updated:
             updated['gathering_threshold'] = 5
+        if 'sound_threshold' not in updated:
+            updated['sound_threshold'] = 75
         socketio.emit('camera_updated', updated)
         return jsonify({'message': 'Camera updated successfully', 'camera': updated}), 200
     else:

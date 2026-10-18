@@ -47,7 +47,7 @@ def simulate_detection():
         # Randomly select a camera that the user has added
         camera = random.choice(cameras)
         
-        crime_types = ["Weapon", "Assault", "Suspicious Activity", "Vandalism", "CROWD GATHERING LIMIT EXCEEDED"]
+        crime_types = ["Weapon", "Assault", "Suspicious Activity", "Vandalism", "CROWD GATHERING LIMIT EXCEEDED", "HIGH NOISE / AUDIO DISTRESS DETECTED"]
         alert = {
             "type": random.choice(crime_types),
             "camera_id": camera.get('name', camera.get('camera_id')),

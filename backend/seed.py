@@ -26,12 +26,12 @@ def seed_db():
     ]
     criminal_records_collection.insert_many(records)
     
-    print("Seeding Cameras with Gathering Thresholds...")
+    print("Seeding Cameras with Gathering and Sound Thresholds...")
     cameras_collection.delete_many({})
     cameras = [
-        {'camera_id': 'CAM-001', 'area': 'Downtown', 'name': 'Main Street Junction', 'status': 'Active', 'gathering_threshold': 5, 'stream_url': 'http://158.58.130.148/mjpg/video.mjpg'},
-        {'camera_id': 'CAM-002', 'area': 'North Side', 'name': 'North Park Gate', 'status': 'Active', 'gathering_threshold': 4, 'stream_url': 'http://158.58.130.148/mjpg/video.mjpg'},
-        {'camera_id': 'CAM-003', 'area': 'Downtown', 'name': 'City Hall Entrance', 'status': 'Active', 'gathering_threshold': 6, 'stream_url': 'http://158.58.130.148/mjpg/video.mjpg'}
+        {'camera_id': 'CAM-001', 'area': 'Downtown', 'name': 'Main Street Junction', 'status': 'Active', 'gathering_threshold': 5, 'sound_threshold': 75, 'stream_url': 'http://158.58.130.148/mjpg/video.mjpg'},
+        {'camera_id': 'CAM-002', 'area': 'North Side', 'name': 'North Park Gate', 'status': 'Active', 'gathering_threshold': 4, 'sound_threshold': 70, 'stream_url': 'http://158.58.130.148/mjpg/video.mjpg'},
+        {'camera_id': 'CAM-003', 'area': 'Downtown', 'name': 'City Hall Entrance', 'status': 'Active', 'gathering_threshold': 6, 'sound_threshold': 80, 'stream_url': 'http://158.58.130.148/mjpg/video.mjpg'}
     ]
     cameras_collection.insert_many(cameras)
 

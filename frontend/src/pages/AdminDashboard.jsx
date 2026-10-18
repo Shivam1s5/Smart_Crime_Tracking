@@ -18,7 +18,8 @@ import {
   Activity, 
   SlidersHorizontal,
   Maximize2,
-  Camera
+  Camera,
+  Volume2
 } from 'lucide-react';
 
 export default function AdminDashboard() {
@@ -34,7 +35,8 @@ export default function AdminDashboard() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [showThresholdModal, setShowThresholdModal] = useState(false);
   const [selectedCameraForThreshold, setSelectedCameraForThreshold] = useState(null);
-  const [newThresholdValue, setNewThresholdValue] = useState(5);
+  const [newGatheringThresholdValue, setNewGatheringThresholdValue] = useState(5);
+  const [newSoundThresholdValue, setNewSoundThresholdValue] = useState(75);
   const [selectedScreenshot, setSelectedScreenshot] = useState(null);
 
   // New Camera Form
@@ -42,7 +44,8 @@ export default function AdminDashboard() {
     name: '',
     area: '',
     stream_url: '',
-    gathering_threshold: 5
+    gathering_threshold: 5,
+    sound_threshold: 75
   });
 
   // Filter for alerts
@@ -94,7 +97,8 @@ export default function AdminDashboard() {
         name: newCam.name,
         area: newCam.area,
         stream_url: newCam.stream_url,
-        gathering_threshold: parseInt(newCam.gathering_threshold, 10) || 5
+        gathering_threshold: parseInt(newCam.gathering_threshold, 10) || 5,
+        sound_threshold: parseInt(newCam.sound_threshold, 10) || 75
       };
 
       const res = await axios.post(`${API_BASE}/api/cameras`, payload, {
@@ -108,7 +112,7 @@ export default function AdminDashboard() {
       }
 
       setShowAddModal(false);
-      setNewCam({ name: '', area: '', stream_url: '', gathering_threshold: 5 });
+      setNewCam({ name: '', area: '', stream_url: '', gathering_threshold: 5, sound_threshold: 75 });
     } catch (err) {
       console.error("Error creating camera:", err);
       alert("Failed to create camera. Please check logs.");
@@ -131,7 +135,8 @@ export default function AdminDashboard() {
 
   const handleOpenThresholdModal = (cam) => {
     setSelectedCameraForThreshold(cam);
-    setNewThresholdValue(cam.gathering_threshold || 5);
+    setNewGatheringThresholdValue(cam.gathering_threshold || 5);
+    setNewSoundThresholdValue(cam.sound_threshold || 75);
     setShowThresholdModal(true);
   };
 
@@ -140,17 +145,19 @@ export default function AdminDashboard() {
     if (!selectedCameraForThreshold) return;
     try {
       const token = localStorage.getItem('token');
-      const threshold = Math.max(1, parseInt(newThresholdValue, 10));
+      const gathering_threshold = Math.max(1, parseInt(newGatheringThresholdValue, 10));
+      const sound_threshold = Math.max(30, Math.min(120, parseInt(newSoundThresholdValue, 10)));
 
       await axios.put(`${API_BASE}/api/cameras/${selectedCameraForThreshold.camera_id}`, {
-        gathering_threshold: threshold
+        gathering_threshold,
+        sound_threshold
       }, {
         headers: { Authorization: `Bearer ${token}` }
       });
 
       setCameras(cameras.map(c => 
         c.camera_id === selectedCameraForThreshold.camera_id 
-          ? { ...c, gathering_threshold: threshold } 
+          ? { ...c, gathering_threshold, sound_threshold } 
           : c
       ));
 
@@ -178,13 +185,19 @@ export default function AdminDashboard() {
   const totalCameras = cameras.length;
   const totalAlerts = alerts.length;
   const crowdAlertsCount = alerts.filter(a => a.type && a.type.toUpperCase().includes('GATHERING')).length;
-  const threatAlertsCount = alerts.filter(a => !a.type || !a.type.toUpperCase().includes('GATHERING')).length;
+  const noiseAlertsCount = alerts.filter(a => a.type && (a.type.toUpperCase().includes('NOISE') || a.type.toUpperCase().includes('AUDIO'))).length;
+  const threatAlertsCount = alerts.filter(a => {
+    const t = (a.type || '').toUpperCase();
+    return !t.includes('GATHERING') && !t.includes('NOISE') && !t.includes('AUDIO');
+  }).length;
   const totalOperators = usersList.length;
 
   const filteredAlerts = alerts.filter(a => {
+    const t = (a.type || '').toUpperCase();
     if (alertFilter === 'ALL') return true;
-    if (alertFilter === 'CROWD') return a.type && a.type.toUpperCase().includes('GATHERING');
-    if (alertFilter === 'THREATS') return !a.type || !a.type.toUpperCase().includes('GATHERING');
+    if (alertFilter === 'CROWD') return t.includes('GATHERING');
+    if (alertFilter === 'NOISE') return t.includes('NOISE') || t.includes('AUDIO');
+    if (alertFilter === 'THREATS') return !t.includes('GATHERING') && !t.includes('NOISE') && !t.includes('AUDIO');
     return true;
   });
 
@@ -206,41 +219,69 @@ export default function AdminDashboard() {
         </div>
       )}
 
-      {/* Edit Gathering Threshold Modal */}
+      {/* Edit Gathering & Sound Threshold Modal */}
       {showThresholdModal && selectedCameraForThreshold && (
         <div style={{
           position: 'fixed', top: 0, left: 0, width: '100%', height: '100%',
           background: 'rgba(0,0,0,0.75)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 9999
         }}>
-          <div className="glass-panel" style={{ padding: '32px', width: '380px', background: 'rgba(15,23,42,0.95)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '12px' }}>
+          <div className="glass-panel" style={{ padding: '32px', width: '420px', background: 'rgba(15,23,42,0.95)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '12px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
               <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <SlidersHorizontal size={20} color="var(--accent)" /> Configure Gathering Limit
+                <SlidersHorizontal size={20} color="var(--accent)" /> Configure Camera Limits
               </h3>
               <X size={20} style={{ cursor: 'pointer' }} onClick={() => setShowThresholdModal(false)} />
             </div>
-            <p style={{ fontSize: '0.88rem', color: 'var(--text-secondary)', marginBottom: '16px' }}>
-              Set maximum permitted gathering density for <strong>{selectedCameraForThreshold.name}</strong> ({selectedCameraForThreshold.area}). An automatic red alert will trigger if person count exceeds this limit.
+            <p style={{ fontSize: '0.86rem', color: 'var(--text-secondary)', marginBottom: '18px' }}>
+              Configure gathering and sound safety thresholds for <strong>{selectedCameraForThreshold.name}</strong> ({selectedCameraForThreshold.area}).
             </p>
-            <form onSubmit={handleSaveThreshold}>
-              <div style={{ marginBottom: '20px' }}>
-                <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.9rem', color: '#cbd5e1' }}>
-                  Maximum Gathering Limit (Persons)
+            <form onSubmit={handleSaveThreshold} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              <div>
+                <label style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px', fontSize: '0.88rem', color: '#cbd5e1' }}>
+                  <span>👥 Gathering Limit</span>
+                  <span style={{ color: 'var(--accent)', fontWeight: 'bold' }}>{newGatheringThresholdValue} Persons</span>
                 </label>
                 <input 
-                  type="number" 
+                  type="range" 
                   min="1" 
                   max="50" 
-                  className="input-glass" 
-                  value={newThresholdValue} 
-                  onChange={(e) => setNewThresholdValue(e.target.value)} 
-                  required 
-                  style={{ width: '100%', padding: '12px', fontSize: '1.1rem', fontWeight: 'bold', color: 'var(--accent)' }}
+                  value={newGatheringThresholdValue} 
+                  onChange={(e) => setNewGatheringThresholdValue(e.target.value)} 
+                  style={{ width: '100%', accentColor: 'var(--accent)' }}
                 />
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: '#64748b', marginTop: '2px' }}>
+                  <span>1 Person</span>
+                  <span>25 Persons</span>
+                  <span>50 Persons</span>
+                </div>
               </div>
-              <div style={{ display: 'flex', gap: '10px' }}>
+
+              <div>
+                <label style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px', fontSize: '0.88rem', color: '#cbd5e1' }}>
+                  <span>🔊 Sound / Noise Limit</span>
+                  <span style={{ color: '#eab308', fontWeight: 'bold' }}>{newSoundThresholdValue} dB</span>
+                </label>
+                <input 
+                  type="range" 
+                  min="30" 
+                  max="110" 
+                  value={newSoundThresholdValue} 
+                  onChange={(e) => setNewSoundThresholdValue(e.target.value)} 
+                  style={{ width: '100%', accentColor: '#eab308' }}
+                />
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: '#64748b', marginTop: '2px' }}>
+                  <span>45 dB (Quiet)</span>
+                  <span>75 dB (Default)</span>
+                  <span>95 dB (High Noise)</span>
+                </div>
+                <span style={{ fontSize: '0.76rem', color: 'var(--text-secondary)', display: 'block', marginTop: '4px' }}>
+                  Alert triggers automatically if noise exceeds this limit for &gt; 1.5s.
+                </span>
+              </div>
+
+              <div style={{ display: 'flex', gap: '10px', marginTop: '6px' }}>
                 <button type="submit" className="btn-primary" style={{ flex: 1, padding: '10px' }}>
-                  Save & Apply Limit
+                  Save & Apply Limits
                 </button>
                 <button type="button" onClick={() => setShowThresholdModal(false)} style={{ background: 'transparent', border: '1px solid rgba(255,255,255,0.2)', color: '#fff', borderRadius: '6px', padding: '10px 16px', cursor: 'pointer' }}>
                   Cancel
@@ -299,7 +340,7 @@ export default function AdminDashboard() {
                 />
               </div>
               <div>
-                <label style={{ display: 'block', marginBottom: '6px', fontSize: '0.85rem', color: '#cbd5e1' }}>Max Gathering Limit (Threshold)</label>
+                <label style={{ display: 'block', marginBottom: '6px', fontSize: '0.85rem', color: '#cbd5e1' }}>Max Gathering Limit (Persons)</label>
                 <input 
                   type="number" 
                   min="1" 
@@ -310,6 +351,19 @@ export default function AdminDashboard() {
                   required 
                 />
                 <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>Alert fires when person count surpasses this threshold.</span>
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '6px', fontSize: '0.85rem', color: '#cbd5e1' }}>Sound / Noise Limit (dB)</label>
+                <input 
+                  type="number" 
+                  min="30" 
+                  max="110" 
+                  className="input-glass" 
+                  value={newCam.sound_threshold} 
+                  onChange={(e) => setNewCam({ ...newCam, sound_threshold: e.target.value })} 
+                  required 
+                />
+                <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>Default 75 dB. Alerts if sustained over 1.5 seconds.</span>
               </div>
               <button type="submit" className="btn-primary" style={{ marginTop: '8px', padding: '12px' }}>
                 Deploy Camera
@@ -359,7 +413,7 @@ export default function AdminDashboard() {
       </div>
 
       {/* Metric KPI Cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '16px' }}>
         <div className="glass-panel" style={{ padding: '20px', borderRadius: '10px', borderLeft: '4px solid #38bdf8' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span style={{ color: '#94a3b8', fontSize: '0.85rem', fontWeight: 500 }}>Active Camera Fleet</span>
@@ -375,14 +429,27 @@ export default function AdminDashboard() {
 
         <div className="glass-panel" style={{ padding: '20px', borderRadius: '10px', borderLeft: '4px solid #f59e0b' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ color: '#94a3b8', fontSize: '0.85rem', fontWeight: 500 }}>Gathering Threshold Alerts</span>
+            <span style={{ color: '#94a3b8', fontSize: '0.85rem', fontWeight: 500 }}>Gathering Limit Alerts</span>
             <Users size={18} color="#f59e0b" />
           </div>
           <div style={{ fontSize: '2rem', fontWeight: 'bold', marginTop: '8px', color: '#f59e0b' }}>
             {crowdAlertsCount}
           </div>
           <span style={{ fontSize: '0.78rem', color: '#94a3b8', marginTop: '4px', display: 'block' }}>
-            Overcrowding threshold breaches
+            Overcrowding breaches
+          </span>
+        </div>
+
+        <div className="glass-panel" style={{ padding: '20px', borderRadius: '10px', borderLeft: '4px solid #eab308' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ color: '#94a3b8', fontSize: '0.85rem', fontWeight: 500 }}>Noise Threshold Alerts</span>
+            <Volume2 size={18} color="#eab308" />
+          </div>
+          <div style={{ fontSize: '2rem', fontWeight: 'bold', marginTop: '8px', color: '#eab308' }}>
+            {noiseAlertsCount}
+          </div>
+          <span style={{ fontSize: '0.78rem', color: '#94a3b8', marginTop: '4px', display: 'block' }}>
+            Audio distress breaches
           </span>
         </div>
 
@@ -447,7 +514,7 @@ export default function AdminDashboard() {
                   <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', color: '#94a3b8' }}>
                     <th style={{ padding: '10px 8px' }}>Camera</th>
                     <th style={{ padding: '10px 8px' }}>Zone</th>
-                    <th style={{ padding: '10px 8px' }}>Gathering Limit</th>
+                    <th style={{ padding: '10px 8px' }}>Safety Limits (Crowd & Sound)</th>
                     <th style={{ padding: '10px 8px' }}>Status</th>
                     <th style={{ padding: '10px 8px', textAlign: 'right' }}>Actions</th>
                   </tr>
@@ -463,17 +530,28 @@ export default function AdminDashboard() {
                         {cam.area}
                       </td>
                       <td style={{ padding: '12px 8px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                           <span style={{ 
                             background: 'rgba(56, 189, 248, 0.15)', 
                             color: '#38bdf8', 
-                            padding: '4px 10px', 
-                            borderRadius: '14px', 
+                            padding: '4px 8px', 
+                            borderRadius: '12px', 
                             fontWeight: 'bold',
                             border: '1px solid rgba(56, 189, 248, 0.3)',
-                            fontSize: '0.82rem'
+                            fontSize: '0.8rem'
                           }}>
-                            👥 Max {cam.gathering_threshold || 5} Persons
+                            👥 {cam.gathering_threshold || 5} Persons
+                          </span>
+                          <span style={{ 
+                            background: 'rgba(234, 179, 8, 0.15)', 
+                            color: '#eab308', 
+                            padding: '4px 8px', 
+                            borderRadius: '12px', 
+                            fontWeight: 'bold',
+                            border: '1px solid rgba(234, 179, 8, 0.3)',
+                            fontSize: '0.8rem'
+                          }}>
+                            🔊 {cam.sound_threshold || 75} dB
                           </span>
                           <button 
                             onClick={() => handleOpenThresholdModal(cam)}
@@ -485,7 +563,7 @@ export default function AdminDashboard() {
                               display: 'flex',
                               alignItems: 'center'
                             }}
-                            title="Edit Gathering Limit"
+                            title="Configure Safety Limits"
                           >
                             <Edit3 size={15} />
                           </button>
@@ -553,7 +631,7 @@ export default function AdminDashboard() {
 
           {/* Filter Pills */}
           <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
-            {['ALL', 'CROWD', 'THREATS'].map(filter => (
+            {['ALL', 'CROWD', 'NOISE', 'THREATS'].map(filter => (
               <button
                 key={filter}
                 onClick={() => setAlertFilter(filter)}
@@ -568,7 +646,7 @@ export default function AdminDashboard() {
                   cursor: 'pointer'
                 }}
               >
-                {filter === 'ALL' ? 'All Incidents' : filter === 'CROWD' ? 'Overcrowding' : 'Weapons & Combat'}
+                {filter === 'ALL' ? 'All Incidents' : filter === 'CROWD' ? 'Overcrowding' : filter === 'NOISE' ? 'High Noise' : 'Weapons & Combat'}
               </button>
             ))}
           </div>
@@ -581,12 +659,16 @@ export default function AdminDashboard() {
             ) : (
               filteredAlerts.map((alert, i) => {
                 const isCrowd = alert.type && alert.type.toUpperCase().includes('GATHERING');
+                const isNoise = alert.type && (alert.type.toUpperCase().includes('NOISE') || alert.type.toUpperCase().includes('AUDIO'));
+                const alertColor = isCrowd ? '#f59e0b' : isNoise ? '#eab308' : '#ef4444';
+                const alertBg = isCrowd ? 'rgba(245, 158, 11, 0.08)' : isNoise ? 'rgba(234, 179, 8, 0.08)' : 'rgba(239, 68, 68, 0.08)';
+
                 return (
                   <div 
                     key={alert._id || i} 
                     style={{ 
-                      background: isCrowd ? 'rgba(245, 158, 11, 0.08)' : 'rgba(239, 68, 68, 0.08)',
-                      borderLeft: isCrowd ? '4px solid #f59e0b' : '4px solid #ef4444',
+                      background: alertBg,
+                      borderLeft: `4px solid ${alertColor}`,
                       padding: '12px',
                       borderRadius: '8px',
                       border: '1px solid rgba(255,255,255,0.08)',
@@ -594,7 +676,7 @@ export default function AdminDashboard() {
                     }}
                   >
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '6px' }}>
-                      <strong style={{ color: isCrowd ? '#f59e0b' : '#ef4444', fontSize: '0.88rem' }}>
+                      <strong style={{ color: alertColor, fontSize: '0.88rem' }}>
                         {alert.type}
                       </strong>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
