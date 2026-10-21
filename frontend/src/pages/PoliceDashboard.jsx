@@ -153,6 +153,7 @@ export default function PoliceDashboard() {
   const [model, setModel] = useState(null);
   const [poseModel, setPoseModel] = useState(null);
   const aiIntervalRef = useRef(null);
+  const poseHistoryRef = useRef([]); // Stores tracked subject keypoints, velocities, and facial dynamics over time
 
   useEffect(() => {
     // Pre-load AI models for instant responsiveness
@@ -597,11 +598,141 @@ export default function PoliceDashboard() {
                    strikingWrist: null,
                    targetZone: '',
                    armedWeapon: null,
-                   isResting: false
+                   isResting: false,
+                   vLeftWrist: 0,
+                   vRightWrist: 0,
+                   vHead: 0,
+                   headDirX: 0,
+                   headDirY: 0,
+                   expressionType: 'NEUTRAL',
+                   expressionLabel: 'Calm / Neutral',
+                   expressionIcon: '😊',
+                   expressionColor: '#10b981',
+                   tensionScore: 0
                };
            });
 
-           // Associate detected weapons with the closest person (high confidence only)
+           // 1. Temporal Motion Tracking & Kinetic Velocity Calculation
+           const currentTime = Date.now();
+           const prevHistory = poseHistoryRef.current || [];
+           const updatedHistory = [];
+
+           personEntities.forEach(pe => {
+               let bestMatch = null;
+               let minCentroidDist = Infinity;
+
+               prevHistory.forEach(prev => {
+                   const dist = Math.hypot(pe.centerX - prev.centerX, pe.centerY - prev.centerY);
+                   if (dist < minCentroidDist) {
+                       minCentroidDist = dist;
+                       bestMatch = prev;
+                   }
+               });
+
+               let dt = 0.2;
+               let vLW = 0, vRW = 0, vHead = 0;
+               let headDirX = 0, headDirY = 0;
+
+               if (bestMatch && minCentroidDist < pe.shoulderWidth * 2.2) {
+                   dt = Math.max(0.08, (currentTime - bestMatch.timestamp) / 1000);
+
+                   if (pe.leftWrist && pe.leftWrist.score > 0.25 && bestMatch.leftWrist && bestMatch.leftWrist.score > 0.25) {
+                       vLW = Math.hypot(pe.leftWrist.x - bestMatch.leftWrist.x, pe.leftWrist.y - bestMatch.leftWrist.y) / dt;
+                   }
+                   if (pe.rightWrist && pe.rightWrist.score > 0.25 && bestMatch.rightWrist && bestMatch.rightWrist.score > 0.25) {
+                       vRW = Math.hypot(pe.rightWrist.x - bestMatch.rightWrist.x, pe.rightWrist.y - bestMatch.rightWrist.y) / dt;
+                   }
+                   const dHeadX = pe.headX - bestMatch.headX;
+                   const dHeadY = pe.headY - bestMatch.headY;
+                   vHead = Math.hypot(dHeadX, dHeadY) / dt;
+                   headDirX = dHeadX / dt;
+                   headDirY = dHeadY / dt;
+               }
+
+               pe.vLeftWrist = Math.round(vLW);
+               pe.vRightWrist = Math.round(vRW);
+               pe.vHead = Math.round(vHead);
+               pe.headDirX = headDirX;
+               pe.headDirY = headDirY;
+
+               updatedHistory.push({
+                   id: pe.id,
+                   centerX: pe.centerX,
+                   centerY: pe.centerY,
+                   headX: pe.headX,
+                   headY: pe.headY,
+                   leftWrist: pe.leftWrist ? { x: pe.leftWrist.x, y: pe.leftWrist.y, score: pe.leftWrist.score } : null,
+                   rightWrist: pe.rightWrist ? { x: pe.rightWrist.x, y: pe.rightWrist.y, score: pe.rightWrist.score } : null,
+                   timestamp: currentTime
+               });
+           });
+
+           poseHistoryRef.current = updatedHistory;
+
+           // 2. Facial Expression & Tension / Distress Dynamics Analysis
+           personEntities.forEach(pe => {
+               const nose = pe.nose;
+               const leftEye = pe.kpMap['left_eye'];
+               const rightEye = pe.kpMap['right_eye'];
+
+               const hasFacePoints = (nose && nose.score > 0.2) ||
+                   ((leftEye && leftEye.score > 0.2) && (rightEye && rightEye.score > 0.2));
+
+               let expressionType = 'NEUTRAL';
+               let expressionLabel = 'Calm / Neutral';
+               let expressionIcon = '😊';
+               let expressionColor = '#10b981';
+               let tensionScore = 0.1;
+
+               if (hasFacePoints) {
+                   const eyeSpan = (leftEye && rightEye && leftEye.score > 0.2 && rightEye.score > 0.2)
+                       ? Math.hypot(rightEye.x - leftEye.x, rightEye.y - leftEye.y)
+                       : pe.shoulderWidth * 0.28;
+
+                   const eyeMidX = (leftEye && rightEye && leftEye.score > 0.2 && rightEye.score > 0.2)
+                       ? (leftEye.x + rightEye.x) / 2 : pe.headX;
+
+                   const noseDev = (nose && nose.score > 0.2) ? Math.abs(nose.x - eyeMidX) / Math.max(eyeSpan, 12) : 0;
+                   const isHeadTurnedFlinch = noseDev > 0.38;
+                   const isHighHeadRecoil = pe.vHead >= 140;
+                   const maxWristSpeed = Math.max(pe.vLeftWrist, pe.vRightWrist);
+                   const isHighSpeedStrikeMotion = maxWristSpeed >= 240;
+
+                   if (isHighHeadRecoil || (isHeadTurnedFlinch && pe.vHead > 90)) {
+                       expressionType = 'DISTRESSED';
+                       expressionLabel = 'Distressed (Recoil / Flinch)';
+                       expressionIcon = '😨';
+                       expressionColor = '#f97316';
+                       tensionScore = 0.88;
+                   } else if (isHighSpeedStrikeMotion && pe.vHead > 70) {
+                       expressionType = 'AGGRESSIVE';
+                       expressionLabel = 'Aggressive (Strike Velocity)';
+                       expressionIcon = '😡';
+                       expressionColor = '#ef4444';
+                       tensionScore = 0.90;
+                   } else if (maxWristSpeed > 160 || pe.vHead > 100) {
+                       expressionType = 'TENSE';
+                       expressionLabel = 'Tense / Alert';
+                       expressionIcon = '😠';
+                       expressionColor = '#f59e0b';
+                       tensionScore = 0.65;
+                   } else {
+                       expressionType = 'NEUTRAL';
+                       expressionLabel = 'Calm / Relaxed';
+                       expressionIcon = '😊';
+                       expressionColor = '#10b981';
+                       tensionScore = 0.1;
+                   }
+               }
+
+               pe.expressionType = expressionType;
+               pe.expressionLabel = expressionLabel;
+               pe.expressionIcon = expressionIcon;
+               pe.expressionColor = expressionColor;
+               pe.tensionScore = tensionScore;
+           });
+
+           // 3. Associate detected weapons with the closest person (high confidence only)
            detectedWeapons.forEach(w => {
                const [wX, wY, wW, wH] = w.bbox;
                const wCenterX = wX + wW / 2;
@@ -629,9 +760,22 @@ export default function PoliceDashboard() {
                }
            });
 
-           // 1. Detect Dancing / Celebration / Peaceful Gestures to eliminate false alarms
+           // 4. STRICT SOLITARY PERSON GUARD:
+           // If only 1 person is present, fighting is physically impossible!
+           // An isolated individual can ONLY alert if an actual lethal weapon (knife/gun/bat/scissors) is detected in their possession!
+           if (personEntities.length < 2) {
+               personEntities.forEach(pe => {
+                   if (pe.state !== 'ARMED') {
+                       pe.state = 'SOLO_PEACEFUL';
+                       pe.statusLabel = pe.isResting ? 'Relaxed (Resting Face / Chin)' : 'Solo: Peaceful (No Weapon)';
+                       pe.threatScore = 0;
+                   }
+               });
+           }
+
+           // 5. Detect Dancing / Celebration / Peaceful Gestures to eliminate false alarms
            personEntities.forEach(pe => {
-               if (pe.state !== 'ARMED') {
+               if (pe.state !== 'ARMED' && pe.state !== 'SOLO_PEACEFUL') {
                    const noseY = (pe.nose && pe.nose.score > 0.20) ? pe.nose.y : (pe.centerY - pe.shoulderWidth * 0.4);
                    const leftWrist = pe.leftWrist;
                    const rightWrist = pe.rightWrist;
@@ -657,9 +801,9 @@ export default function PoliceDashboard() {
                }
            });
 
-           // 2. Intelligent Facial & Chin/Cheek Resting Analysis (Eliminates false alarms on casual sitting!)
+           // 6. Intelligent Facial & Chin/Cheek Resting Analysis (Eliminates false alarms on casual sitting!)
            personEntities.forEach(pe => {
-               if (pe.state === 'NORMAL') {
+               if (pe.state === 'NORMAL' || pe.state === 'SOLO_PEACEFUL') {
                    const nose = pe.nose;
                    const leftEar = pe.kpMap['left_ear'];
                    const rightEar = pe.kpMap['right_ear'];
@@ -683,7 +827,7 @@ export default function PoliceDashboard() {
                                          (rightAtFace && (!pe.leftWrist || pe.leftWrist.score < 0.28 || pe.leftWrist.y > pe.centerY));
 
                    if (oneHandOnFace) {
-                       pe.state = 'NORMAL';
+                       if (pe.state !== 'SOLO_PEACEFUL') pe.state = 'NORMAL';
                        pe.statusLabel = 'Relaxed (Resting Face / Chin)';
                        pe.threatScore = 0;
                        pe.isResting = true;
@@ -691,7 +835,7 @@ export default function PoliceDashboard() {
                }
            });
 
-           // 3. Detect Defensive Guard / Covering Face from Attack (only if multiple people present!)
+           // 7. Detect Defensive Guard / Covering Face from Attack (only if multiple people present!)
            personEntities.forEach(pe => {
                if (pe.state === 'NORMAL' && !pe.isResting && personEntities.length >= 2) {
                    const checkCovering = (w) => w && w.score > 0.28 && Math.hypot(w.x - pe.headX, w.y - pe.headY) < pe.shoulderWidth * 0.60;
@@ -703,7 +847,7 @@ export default function PoliceDashboard() {
                }
            });
 
-           // 4. Analyze Physical Strikes: Attacker extending fist into Target's head/torso (Requires >= 2 persons!)
+           // 8. Analyze Physical Strikes: Attacker extending fist into Target's head/torso with High Kinetic Velocity & Facial Distress
            const strikes = [];
 
            if (personEntities.length >= 2) {
@@ -717,7 +861,7 @@ export default function PoliceDashboard() {
 
                        const avgScale = (p1.shoulderWidth + p2.shoulderWidth) / 2;
 
-                       const evaluateWristStrike = (wrist, shoulder) => {
+                       const evaluateWristStrike = (wrist, shoulder, wristSpeed) => {
                            if (!wrist || wrist.score < 0.35) return null;
 
                            // Self-touch check: closer to own body than target
@@ -741,19 +885,37 @@ export default function PoliceDashboard() {
 
                            // Proximity to victim's vital points
                            const strikeThreshold = Math.max(avgScale * 0.88, 70);
+                           const isNearHead = distToTargetHead < strikeThreshold;
+                           const isNearTorso = distToTargetTorso < strikeThreshold;
 
-                           if (distToTargetHead < strikeThreshold || distToTargetTorso < strikeThreshold) {
-                               return {
-                                   targetZone: distToTargetHead <= distToTargetTorso ? 'Head' : 'Torso',
-                                   wrist,
-                                   confidence: Math.max(wrist.score, 0.82)
-                               };
-                           }
-                           return null;
+                           if (!isNearHead && !isNearTorso) return null;
+
+                           // TEMPORAL MOTION & VELOCITY GATE:
+                           // A real strike requires explosive kinetic wrist speed!
+                           const hasViolentVelocity = wristSpeed >= 240;
+
+                           // FACIAL RECOIL & EXPRESSION GATE:
+                           const victimDistressed = p2.expressionType === 'DISTRESSED' || p2.vHead >= 140;
+
+                           // If neither explosive velocity nor victim recoil/distress is present,
+                           // this is a benign reach, slow point, or friendly handshake:
+                           if (!hasViolentVelocity && !victimDistressed) return null;
+
+                           const strikeConfidence = (hasViolentVelocity && victimDistressed) ? 0.95
+                                                  : hasViolentVelocity ? 0.88
+                                                  : 0.82;
+
+                           return {
+                               targetZone: isNearHead ? 'Head' : 'Torso',
+                               wrist,
+                               wristSpeed,
+                               confidence: strikeConfidence,
+                               victimRecoil: victimDistressed
+                           };
                        };
 
-                       const hit = evaluateWristStrike(p1.leftWrist, p1.leftShoulder) || 
-                                   evaluateWristStrike(p1.rightWrist, p1.rightShoulder);
+                       const hit = evaluateWristStrike(p1.leftWrist, p1.leftShoulder, p1.vLeftWrist) || 
+                                   evaluateWristStrike(p1.rightWrist, p1.rightShoulder, p1.vRightWrist);
 
                        if (hit) {
                            strikes.push({
@@ -762,11 +924,12 @@ export default function PoliceDashboard() {
                                attackerWrist: hit.wrist,
                                victimTarget: hit.targetZone === 'Head' ? { x: p2.headX, y: p2.headY } : { x: p2.centerX, y: p2.centerY },
                                targetZone: hit.targetZone,
-                               confidence: hit.confidence
+                               confidence: hit.confidence,
+                               wristSpeed: hit.wristSpeed
                            });
 
                            p1.state = 'AGGRESSOR';
-                           p1.statusLabel = `STRIKING Person #${p2.id} (${hit.targetZone})`;
+                           p1.statusLabel = `STRIKING Person #${p2.id} (${hit.targetZone}) [${hit.wristSpeed} px/s]`;
                            p1.strikingTargetId = p2.id;
                            p1.strikingWrist = hit.wrist;
                            p1.targetZone = hit.targetZone;
@@ -774,14 +937,16 @@ export default function PoliceDashboard() {
 
                            if (p2.state !== 'AGGRESSOR' && p2.state !== 'ARMED') {
                                p2.state = 'VICTIM';
-                               p2.statusLabel = `UNDER ATTACK by Person #${p1.id}`;
+                               p2.statusLabel = hit.victimRecoil
+                                   ? `UNDER ATTACK by Person #${p1.id} (Head Recoil / Flinch)`
+                                   : `UNDER ATTACK by Person #${p1.id}`;
                            }
                        }
                    }
                }
            }
 
-           // 5. Genuine Fighting Stance & Combat Boxing Guard Detection
+           // 9. Genuine Fighting Stance & Combat Boxing Guard Detection
            // Rule: ONLY alert if TWO persons are confronting each other in interactive combat distance!
            // Single person alone is NEVER flagged as a fighting alert!
            personEntities.forEach(pe => {
@@ -801,11 +966,14 @@ export default function PoliceDashboard() {
                        leftElbow.y > leftWrist.y && rightElbow.y > rightWrist.y; // Elbows below fists
 
                    if (dualGuard) {
-                       // Check if an interactive opponent is nearby (< 3.2 * shoulderWidth)
+                       // Check if an interactive opponent is nearby (< 2.8 * shoulderWidth)
                        const nearbyOpponent = personEntities.find(other => other.id !== pe.id && 
-                           Math.hypot(pe.centerX - other.centerX, pe.centerY - other.centerY) < Math.max(pe.shoulderWidth, other.shoulderWidth) * 3.2);
+                           Math.hypot(pe.centerX - other.centerX, pe.centerY - other.centerY) < Math.max(pe.shoulderWidth, other.shoulderWidth) * 2.8);
 
-                       if (nearbyOpponent) {
+                       // Also verify combat tension or aggressive/tense facial expression
+                       const hasCombatFacialTension = pe.expressionType === 'AGGRESSIVE' || pe.expressionType === 'TENSE' || (nearbyOpponent && nearbyOpponent.expressionType !== 'NEUTRAL');
+
+                       if (nearbyOpponent && hasCombatFacialTension) {
                            pe.state = 'COMBAT_POSE';
                            pe.statusLabel = `🥊 Combat Stance (vs Person #${nearbyOpponent.id})`;
                            pe.threatScore = 0.88;
@@ -814,7 +982,7 @@ export default function PoliceDashboard() {
                }
            });
 
-           // 6. Mutual Brawl Detection (Multiple subjects aggressively engaging)
+           // 10. Mutual Brawl Detection (Multiple subjects aggressively engaging)
            const brawls = [];
            if (personEntities.length >= 2) {
                for (let i = 0; i < personEntities.length; i++) {
@@ -822,7 +990,7 @@ export default function PoliceDashboard() {
                        const p1 = personEntities[i];
                        const p2 = personEntities[j];
 
-                       if (p1.state === 'DANCING' || p2.state === 'DANCING' || p1.isResting || p2.isResting) continue;
+                       if (p1.state === 'DANCING' || p2.state === 'DANCING' || p1.isResting || p2.isResting || p1.state === 'SOLO_PEACEFUL' || p2.state === 'SOLO_PEACEFUL') continue;
 
                        const distCenters = Math.hypot(p1.centerX - p2.centerX, p1.centerY - p2.centerY);
                        const avgScale = (p1.shoulderWidth + p2.shoulderWidth) / 2;
@@ -833,15 +1001,15 @@ export default function PoliceDashboard() {
                            p2.state = 'BRAWL';
                            p1.statusLabel = `BRAWLING with Person #${p2.id}`;
                            p2.statusLabel = `BRAWLING with Person #${p1.id}`;
-                           p1.threatScore = Math.max(p1.threatScore, 0.92);
-                           p2.threatScore = Math.max(p2.threatScore, 0.92);
+                           p1.threatScore = Math.max(p1.threatScore, 0.94);
+                           p2.threatScore = Math.max(p2.threatScore, 0.94);
                            brawls.push({ p1: p1.id, p2: p2.id });
                        }
                    }
                }
            }
 
-           // 7. Threat Prioritization (Only real weapons, genuine assaults, brawls, and combat threats alert!)
+           // 11. Threat Prioritization (Strict Single-Person Armed Gate & Multi-Person Combat Prioritization)
            let primaryAlertMsg = null;
            let maxConfidence = 0;
 
@@ -850,24 +1018,43 @@ export default function PoliceDashboard() {
            const combatIncident = personEntities.find(p => p.state === 'COMBAT_POSE' && p.threatScore >= 0.80);
            const activeStrike = strikes.find(s => s.confidence >= 0.78);
 
-           if (armedPerson && armedPerson.threatScore >= 0.55) {
-               primaryAlertMsg = `Weapon Detected: Person #${armedPerson.id} holding ${armedPerson.armedWeapon}`;
-               maxConfidence = armedPerson.threatScore;
-           } else if (activeStrike) {
-               primaryAlertMsg = `Physical Assault: Person #${activeStrike.attackerId} striking Person #${activeStrike.victimId} (${activeStrike.targetZone})`;
-               maxConfidence = activeStrike.confidence;
-           } else if (brawlIncident) {
-               primaryAlertMsg = `Physical Brawl: Altercation between multiple subjects`;
-               maxConfidence = 0.92;
-           } else if (combatIncident) {
-               primaryAlertMsg = `Hostile Threat: ${combatIncident.statusLabel}`;
-               maxConfidence = combatIncident.threatScore;
-           } else if (isSustainedNoiseBreach) {
-               primaryAlertMsg = `HIGH NOISE / AUDIO DISTRESS DETECTED (${currentSound} dB / Limit: ${soundThreshold} dB)`;
-               maxConfidence = 0.93;
-           } else if (isOvercrowded) {
-               primaryAlertMsg = `CROWD GATHERING LIMIT EXCEEDED (${currentGatheringCount}/${gatheringThreshold} People)`;
-               maxConfidence = 0.95;
+           if (personEntities.length < 2) {
+               // STRICT SOLITARY PERSON GATE:
+               // An isolated individual CANNOT fight!
+               // An alert can ONLY trigger if an actual lethal weapon (knife/gun/bat/scissors) is detected in their hand!
+               if (armedPerson && armedPerson.threatScore >= 0.55) {
+                   primaryAlertMsg = `ARMED SUSPECT DETECTED: Person #${armedPerson.id} holding ${armedPerson.armedWeapon.toUpperCase()}`;
+                   maxConfidence = armedPerson.threatScore;
+               } else {
+                   // Suppress all fighting, combat, or assault alerts completely!
+                   primaryAlertMsg = null;
+               }
+           } else {
+               // MULTI-PERSON ALTERCATION MODE (2+ persons):
+               if (armedPerson && armedPerson.threatScore >= 0.55) {
+                   primaryAlertMsg = `Weapon Detected: Person #${armedPerson.id} holding ${armedPerson.armedWeapon.toUpperCase()}`;
+                   maxConfidence = armedPerson.threatScore;
+               } else if (activeStrike) {
+                   primaryAlertMsg = `Physical Assault: Person #${activeStrike.attackerId} striking Person #${activeStrike.victimId} (${activeStrike.targetZone}) [Motion & Facial Recoil Verified]`;
+                   maxConfidence = activeStrike.confidence;
+               } else if (brawlIncident) {
+                   primaryAlertMsg = `Physical Brawl: Hostile Altercation Between Multiple Subjects`;
+                   maxConfidence = 0.94;
+               } else if (combatIncident) {
+                   primaryAlertMsg = `Hostile Threat: ${combatIncident.statusLabel}`;
+                   maxConfidence = combatIncident.threatScore;
+               }
+           }
+
+           // Crowd & Sound threshold breaches (if not overridden by a violent threat):
+           if (!primaryAlertMsg) {
+               if (isSustainedNoiseBreach) {
+                   primaryAlertMsg = `HIGH NOISE / AUDIO DISTRESS DETECTED (${currentSound} dB / Limit: ${soundThreshold} dB)`;
+                   maxConfidence = 0.93;
+               } else if (isOvercrowded) {
+                   primaryAlertMsg = `CROWD GATHERING LIMIT EXCEEDED (${currentGatheringCount}/${gatheringThreshold} People)`;
+                   maxConfidence = 0.95;
+               }
            }
 
            // Streak confirmation filter (2 cycles = ~0.4s) to eliminate momentary noise
@@ -900,7 +1087,13 @@ export default function PoliceDashboard() {
                        glowColor = 'rgba(220, 38, 38, 0.8)';
                        badgeBg = 'rgba(153, 27, 27, 0.95)';
                        badgeBorder = '#ef4444';
-                       badgeIcon = '🔪';
+                       badgeIcon = '⚠️';
+                   } else if (pe.state === 'SOLO_PEACEFUL') {
+                       themeColor = '#06b6d4'; // Calm Cyan
+                       glowColor = 'rgba(6, 182, 212, 0.4)';
+                       badgeBg = 'rgba(15, 23, 42, 0.88)';
+                       badgeBorder = '#06b6d4';
+                       badgeIcon = '👤';
                    } else if (pe.state === 'AGGRESSOR') {
                        themeColor = '#ef4444'; // Bright Red
                        glowColor = 'rgba(239, 68, 68, 0.9)';
@@ -1064,6 +1257,71 @@ export default function PoliceDashboard() {
                    ctx.fillStyle = '#ffffff';
                    ctx.fillText(fullBadgeText, badgeX + 9, badgeY + 16);
                    ctx.restore();
+
+                   // E. Facial Expression Chip & Tactical Emotion HUD
+                   if (pe.expressionType) {
+                       ctx.save();
+                       ctx.font = 'bold 11px sans-serif';
+                       const exprText = `${pe.expressionIcon} Face: ${pe.expressionLabel}`;
+                       const exprTextW = ctx.measureText(exprText).width;
+                       const exprBadgeW = exprTextW + 16;
+                       const exprBadgeH = 20;
+                       const exprBadgeX = Math.max(8, Math.min(pe.headX - exprBadgeW / 2, canvas.width - exprBadgeW - 8));
+                       const exprBadgeY = Math.min(canvas.height - 24, badgeY + badgeH + 4);
+
+                       ctx.fillStyle = 'rgba(15, 23, 42, 0.92)';
+                       ctx.strokeStyle = pe.expressionColor;
+                       ctx.lineWidth = 1.2;
+                       ctx.shadowColor = pe.expressionColor;
+                       ctx.shadowBlur = 6;
+                       ctx.beginPath();
+                       if (ctx.roundRect) ctx.roundRect(exprBadgeX, exprBadgeY, exprBadgeW, exprBadgeH, 4);
+                       else ctx.rect(exprBadgeX, exprBadgeY, exprBadgeW, exprBadgeH);
+                       ctx.fill();
+                       ctx.stroke();
+
+                       ctx.fillStyle = pe.expressionColor;
+                       ctx.fillText(exprText, exprBadgeX + 8, exprBadgeY + 14);
+
+                       // Tactical Facial Reticle around face / head
+                       const faceR = Math.max(pe.shoulderWidth * 0.28, 22);
+                       ctx.beginPath();
+                       ctx.arc(pe.headX, pe.headY, faceR, 0, 2 * Math.PI);
+                       ctx.strokeStyle = pe.expressionColor;
+                       ctx.lineWidth = (pe.expressionType === 'AGGRESSIVE' || pe.expressionType === 'DISTRESSED') ? 2 : 1;
+                       ctx.setLineDash([3, 3]);
+                       ctx.stroke();
+                       ctx.setLineDash([]);
+                       ctx.restore();
+                   }
+
+                   // F. Kinetic Velocity Speed Indicator near wrists/head if high motion
+                   const maxWristV = Math.max(pe.vLeftWrist, pe.vRightWrist);
+                   if (maxWristV >= 200) {
+                       const activeW = pe.vLeftWrist > pe.vRightWrist ? pe.leftWrist : pe.rightWrist;
+                       if (activeW && activeW.score > 0.25) {
+                           ctx.save();
+                           ctx.font = 'bold 10px monospace';
+                           const vTxt = `⚡ ${maxWristV} px/s`;
+                           const vW = ctx.measureText(vTxt).width + 8;
+                           ctx.fillStyle = 'rgba(239, 68, 68, 0.88)';
+                           ctx.fillRect(activeW.x + 8, activeW.y - 12, vW, 16);
+                           ctx.fillStyle = '#ffffff';
+                           ctx.fillText(vTxt, activeW.x + 12, activeW.y);
+                           ctx.restore();
+                       }
+                   }
+                   if (pe.vHead >= 140) {
+                       ctx.save();
+                       ctx.font = 'bold 10px monospace';
+                       const hTxt = `⚡ Recoil: ${pe.vHead} px/s`;
+                       const hW = ctx.measureText(hTxt).width + 8;
+                       ctx.fillStyle = 'rgba(249, 115, 22, 0.88)';
+                       ctx.fillRect(pe.headX + 10, pe.headY + 12, hW, 16);
+                       ctx.fillStyle = '#ffffff';
+                       ctx.fillText(hTxt, pe.headX + 14, pe.headY + 24);
+                       ctx.restore();
+                   }
                });
 
                // 2. Draw Strike Action Vectors between Attacker and Victim
@@ -1098,7 +1356,7 @@ export default function PoliceDashboard() {
                        ctx.fillStyle = 'rgba(0, 0, 0, 0.88)';
                        ctx.strokeStyle = '#ef4444';
                        ctx.lineWidth = 1.5;
-                       const strikeLabel = `💥 STRIKE (${Math.round(s.confidence * 100)}%)`;
+                       const strikeLabel = `💥 STRIKE (${Math.round(s.confidence * 100)}%) • ${s.wristSpeed ? s.wristSpeed + ' px/s' : ''}`;
                        ctx.font = 'bold 11px sans-serif';
                        const strkW = ctx.measureText(strikeLabel).width + 12;
 
@@ -1212,6 +1470,7 @@ export default function PoliceDashboard() {
   const stopVideoProcessing = () => {
     isProcessingRef.current = false;
     if (aiIntervalRef.current) clearInterval(aiIntervalRef.current);
+    poseHistoryRef.current = [];
     const canvas = canvasRef.current;
     if (canvas) {
       const ctx = canvas.getContext('2d');
