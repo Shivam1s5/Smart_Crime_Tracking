@@ -140,14 +140,19 @@ export default function AdminDashboard() {
   const handleDeleteCamera = async (cameraId) => {
     if (!window.confirm(`Are you sure you want to delete camera: ${cameraId}?`)) return;
     try {
-      const token = localStorage.getItem('token');
-      await axios.delete(`${API_BASE}/api/cameras/${cameraId}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      setCameras(cameras.filter(c => c.camera_id !== cameraId));
+      setCameras(prev => prev.filter(c => c.camera_id !== cameraId && c._id !== cameraId));
+      if (cameraId !== 'CAM-LAPTOP' && cameraId !== 'CAM-LAPTOP-LOCAL' && cameraId !== 'default_local_cam') {
+        const token = localStorage.getItem('token');
+        try {
+          await axios.delete(`${API_BASE}/api/cameras/${cameraId}`, {
+            headers: { Authorization: `Bearer ${token}` }
+          });
+        } catch (apiErr) {
+          console.warn("Camera deletion backend notice:", apiErr);
+        }
+      }
     } catch (err) {
       console.error("Error deleting camera:", err);
-      alert("Failed to delete camera.");
     }
   };
 

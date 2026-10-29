@@ -87,8 +87,8 @@ def main():
     # Convert numeric camera source
     video_source = int(args.source) if args.source.isdigit() else args.source
 
-    # Initialize YOLO Crime Engine
-    engine = YOLOCrimeEngine(model_path=args.model, conf_threshold=0.35, tracker="bytetrack.yaml")
+    # Initialize YOLO Crime Engine (conf_threshold 0.20 for sensitive weapon/knife detection)
+    engine = YOLOCrimeEngine(model_path=args.model, conf_threshold=0.20, tracker="bytetrack.yaml")
 
     # Open video feed
     cap = cv2.VideoCapture(video_source)

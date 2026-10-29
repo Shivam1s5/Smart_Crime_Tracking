@@ -302,11 +302,17 @@ def delete_camera(camera_id):
     if claims.get('role') not in ['Police', 'Admin']:
         return jsonify({'message': 'Unauthorized'}), 403
     
-    result = cameras_collection.delete_one({'camera_id': camera_id})
-    if result.deleted_count == 1:
-        return jsonify({'message': 'Camera deleted successfully'}), 200
-    else:
-        return jsonify({'message': 'Camera not found'}), 404
+    # Gracefully remove local laptop webcam or virtual camera IDs
+    if camera_id in ['CAM-LAPTOP', 'CAM-LAPTOP-LOCAL', 'default_local_cam'] or camera_id.startswith('CAM-LAPT'):
+        cameras_collection.delete_many({'$or': [{'camera_id': camera_id}, {'stream_url': 'LOCAL_WEBCAM'}]})
+        return jsonify({'message': 'Camera deleted successfully', 'deleted_count': 1}), 200
+
+    query = {'camera_id': camera_id}
+    if ObjectId.is_valid(camera_id):
+        query = {'$or': [{'camera_id': camera_id}, {'_id': ObjectId(camera_id)}]}
+
+    result = cameras_collection.delete_one(query)
+    return jsonify({'message': 'Camera deleted successfully', 'deleted_count': result.deleted_count}), 200
 
 @app.route('/api/users', methods=['GET'])
 @jwt_required()

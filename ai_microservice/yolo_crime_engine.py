@@ -23,15 +23,17 @@ from ultralytics import YOLO
 # Class 0: person, 43: knife, 34: baseball bat, 76: scissors
 WEAPON_CLASSES = {
     'knife': 43,
+    'fork': 42,
+    'scissors': 76,
     'baseball bat': 34,
-    'scissors': 76
+    'bottle': 39
 }
 
 # Also support custom weapon names if using a custom-trained crime model
-KNOWN_WEAPON_NAMES = {'knife', 'gun', 'pistol', 'rifle', 'baseball bat', 'bat', 'scissors', 'machete', 'sword', 'blade'}
+KNOWN_WEAPON_NAMES = {'knife', 'gun', 'pistol', 'rifle', 'baseball bat', 'bat', 'scissors', 'fork', 'bottle', 'machete', 'sword', 'blade'}
 
 class YOLOCrimeEngine:
-    def __init__(self, model_path="yolov8n.pt", conf_threshold=0.35, tracker="bytetrack.yaml", device=""):
+    def __init__(self, model_path="yolov8n.pt", conf_threshold=0.20, tracker="bytetrack.yaml", device=""):
         """
         Initialize the YOLO-based Crime & Behavior Tracker.
         Args:
@@ -236,6 +238,17 @@ class YOLOCrimeEngine:
                                 'confidence': 0.94,
                                 'subject_id': p1['id']
                             })
+        elif len(detected_persons) == 1:
+            p = detected_persons[0]
+            if p['velocity'] > 140 and p['state'] != 'ARMED':
+                p['state'] = 'AGGRESSOR'
+                p['label'] = f"KINETIC STRIKE / LUNGE ({int(p['velocity'])} px/s)"
+                p['threat_score'] = 0.90
+                alerts_found.append({
+                    'type': "PHYSICAL ASSAULT (VIOLENT LUNGE)",
+                    'confidence': 0.90,
+                    'subject_id': p['id']
+                })
 
         # 4. Crowd Gathering Threshold Verification
         gathering_count = len(detected_persons)
