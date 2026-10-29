@@ -155,9 +155,6 @@ def search_records():
         
     return jsonify(records), 200
 
-# Real-time multi-device camera feed broadcast cache: camera_id -> feed_data
-latest_camera_feeds = {}
-
 # WebSocket connections
 @socketio.on('connect')
 def handle_connect():
@@ -166,33 +163,6 @@ def handle_connect():
 @socketio.on('disconnect')
 def handle_disconnect():
     print('Client disconnected')
-
-@socketio.on('broadcast_camera_frame')
-def handle_broadcast_camera_frame(data):
-    if not data or not isinstance(data, dict):
-        return
-    cam_id = data.get('camera_id')
-    if cam_id:
-        feed_info = {
-            'camera_id': cam_id,
-            'frame': data.get('frame'),
-            'gathering_count': data.get('gathering_count', 0),
-            'sound_level': data.get('sound_level', 0),
-            'threat': data.get('threat', None),
-            'area': data.get('area', ''),
-            'timestamp': datetime.utcnow().isoformat()
-        }
-        latest_camera_feeds[cam_id] = feed_info
-        # Relay live feed frame to all other connected clients (Police & Admin dashboards)
-        socketio.emit('live_feed_update', feed_info, broadcast=True, include_self=False)
-
-@app.route('/api/cameras/live_feeds', methods=['GET'])
-@jwt_required()
-def get_live_feeds():
-    claims = get_jwt()
-    if claims.get('role') not in ['Police', 'Admin']:
-        return jsonify({'message': 'Unauthorized'}), 403
-    return jsonify(latest_camera_feeds), 200
 
 @app.route('/api/cameras', methods=['GET'])
 @jwt_required()

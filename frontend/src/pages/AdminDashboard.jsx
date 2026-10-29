@@ -68,15 +68,7 @@ export default function AdminDashboard() {
       setCameras((prev) => prev.map(c => c.camera_id === updatedCam.camera_id ? updatedCam : c));
     });
 
-    // Real-time live camera feed broadcast listener
-    socket.on('live_feed_update', (feed) => {
-      if (feed && feed.camera_id) {
-        setLiveFeeds((prev) => ({
-          ...prev,
-          [feed.camera_id]: feed
-        }));
-      }
-    });
+
 
     return () => socket.disconnect();
   }, []);
@@ -97,10 +89,7 @@ export default function AdminDashboard() {
       setAlerts(alertsRes.data || []);
       setUsersList(usersRes.data || []);
 
-      // Fetch active live feeds
-      axios.get(`${API_BASE}/api/cameras/live_feeds`, { headers })
-        .then(res => { if (res.data) setLiveFeeds(res.data); })
-        .catch(() => {});
+
     } catch (err) {
       console.error("Failed to load admin data:", err);
     }

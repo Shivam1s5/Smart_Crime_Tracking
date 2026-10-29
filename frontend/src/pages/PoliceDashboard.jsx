@@ -156,11 +156,12 @@ export default function PoliceDashboard() {
 
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
-  const [isProcessing, setIsProcessing] = useState(true);
-  const isProcessingRef = useRef(true);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const isProcessingRef = useRef(false);
   const [redAlert, setRedAlert] = useState(null);
   const [selectedScreenshot, setSelectedScreenshot] = useState(null);
   const [isCameraPaused, setIsCameraPaused] = useState(false);
+  const [isCameraActive, setIsCameraActive] = useState(true);
   
   // Real-time Live Gathering & Sound / Noise State per camera
   const [liveGatheringCounts, setLiveGatheringCounts] = useState({});
@@ -199,8 +200,7 @@ export default function PoliceDashboard() {
   const recentWeaponsRef = useRef([]); // Stores weapon memory persistence to eliminate single-frame flickering
   const aiIntervalRef = useRef(null);
   const poseHistoryRef = useRef([]); // Stores tracked subject keypoints, velocities, and facial dynamics over time
-  const [relayFeeds, setRelayFeeds] = useState({});
-  const [isLocalBroadcaster, setIsLocalBroadcaster] = useState(true);
+
   const socketRef = useRef(null);
   const lastAlertTimesRef = useRef({});
 
@@ -221,12 +221,7 @@ export default function PoliceDashboard() {
         poseModelRef.current = loadedPose;
         setPoseModel(loadedPose);
 
-        // Auto-start AI monitoring once models are ready
-        setIsProcessing(true);
-        isProcessingRef.current = true;
-        setTimeout(() => {
-          runRealAI();
-        }, 500);
+        // AI models loaded and ready in standby
       } catch (e) {
         console.error("Error pre-loading models:", e);
       }
@@ -280,36 +275,7 @@ export default function PoliceDashboard() {
       setCameras((prev) => prev.map(c => c.camera_id === updatedCam.camera_id ? updatedCam : c));
     });
 
-    // Real-time multi-device live stream relay listener
-    socket.on('live_feed_update', (feed) => {
-      if (feed && feed.camera_id) {
-        setRelayFeeds((prev) => ({
-          ...prev,
-          [feed.camera_id]: feed
-        }));
-        if (feed.gathering_count !== undefined) {
-          setLiveGatheringCounts((prev) => ({
-            ...prev,
-            [feed.camera_id]: feed.gathering_count
-          }));
-        }
-        if (feed.sound_level !== undefined) {
-          setLiveSoundLevels((prev) => ({
-            ...prev,
-            [feed.camera_id]: feed.sound_level
-          }));
-        }
-      }
-    });
 
-    // Fetch initial active live feeds
-    axios.get(`${socketUrl}/api/cameras/live_feeds`, {
-      headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
-    }).then(res => {
-      if (res.data && typeof res.data === 'object') {
-        setRelayFeeds(res.data);
-      }
-    }).catch(() => {});
 
     return () => socket.disconnect();
   }, []);
@@ -1787,24 +1753,7 @@ export default function PoliceDashboard() {
                }
            }
 
-           // Real-time Multi-Device Live Stream Relay Broadcast (emits current composited frame to Socket.IO)
-           if (socketRef.current && activeCam && isProcessingRef.current) {
-               window.lastRelayBroadcast = window.lastRelayBroadcast || 0;
-               if (Date.now() - window.lastRelayBroadcast > 180) {
-                   window.lastRelayBroadcast = Date.now();
-                   const liveSnapshot = captureScreenshot();
-                   if (liveSnapshot) {
-                       socketRef.current.emit('broadcast_camera_frame', {
-                           camera_id: activeCam.camera_id,
-                           frame: liveSnapshot,
-                           gathering_count: currentGatheringCount,
-                           sound_level: currentSound,
-                           threat: primaryAlertMsg,
-                           area: activeCam.area || 'Command Station'
-                       });
-                   }
-               }
-           }
+
 
            // Trigger real alert to police dashboard & play sound (executed AFTER canvas rendering so screenshot has all labels, bodies, and skeletons!)
            const isViolentThreat = aggressor || armedPerson || activeStrike || combatStance;
@@ -2331,23 +2280,7 @@ export default function PoliceDashboard() {
                             <LocalWebcam ref={laptopVideoRef} onAudioLevel={handleAudioLevel} />
                             <canvas ref={canvasRef} style={{ width: '100%', height: '100%', objectFit: 'cover', position: 'absolute', top: 0, left: 0, zIndex: 3, pointerEvents: 'none' }} />
                           </>
-                        ) : (relayFeeds[cam.camera_id]?.frame) ? (
-                          <div style={{ position: 'relative', width: '100%', height: '100%' }}>
-                            <img 
-                              src={relayFeeds[cam.camera_id].frame} 
-                              alt="Live Relay Stream" 
-                              style={{ width: '100%', height: '100%', objectFit: 'cover', position: 'relative', zIndex: 2 }} 
-                            />
-                            <div style={{ 
-                              position: 'absolute', bottom: 8, left: 8, zIndex: 10,
-                              background: 'rgba(16, 185, 129, 0.95)', color: '#fff',
-                              fontSize: '0.72rem', fontWeight: 'bold', padding: '3px 8px',
-                              borderRadius: '4px', display: 'flex', alignItems: 'center', gap: '4px',
-                              boxShadow: '0 0 10px rgba(16, 185, 129, 0.6)'
-                            }}>
-                              <span>📡 LIVE SATELLITE RELAY • SYNCED ACROSS DEVICES</span>
-                            </div>
-                          </div>
+
                         ) : cam.stream_url.includes('youtube.com') ? (
                           <iframe src={cam.stream_url} frameBorder="0" allow="autoplay; encrypted-media" style={{ width: '100%', height: '100%', position: 'relative', zIndex: 2 }}></iframe>
                         ) : (
