@@ -1408,6 +1408,7 @@ export default function PoliceDashboard() {
 
            // Canvas Drawing: Body Frames, Skeletons, Keypoints, HUD Badges & Strike Vectors for EVERY Person
            if (ctx) {
+               try {
                const SKELETON_CONNECTIONS = [
                    ['nose', 'left_eye'], ['nose', 'right_eye'], ['left_eye', 'left_ear'], ['right_eye', 'right_ear'],
                    ['left_shoulder', 'right_shoulder'], ['left_shoulder', 'left_elbow'], ['right_shoulder', 'right_elbow'],
@@ -1516,7 +1517,7 @@ export default function PoliceDashboard() {
                    // Top-Right
                    ctx.beginPath();
                    ctx.moveTo(boxX + boxW - cLen, boxY);
-                   ctx.lineTo(boxX + boxW);
+                   ctx.lineTo(boxX + boxW, boxY);
                    ctx.lineTo(boxX + boxW, boxY + cLen);
                    ctx.stroke();
 
@@ -1781,6 +1782,9 @@ export default function PoliceDashboard() {
                ctx.fillStyle = '#ffffff';
                ctx.fillText(soundHudText, sHudX + 8, sHudY + 15);
                ctx.restore();
+               } catch (drawErr) {
+                   console.error('Tactical Canvas Render Error:', drawErr);
+               }
            }
 
            // Real-time Multi-Device Live Stream Relay Broadcast (emits current composited frame to Socket.IO)
