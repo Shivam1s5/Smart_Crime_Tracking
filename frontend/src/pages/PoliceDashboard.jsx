@@ -4,36 +4,7 @@ import { io } from 'socket.io-client';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import { ShieldAlert, LogOut, Video, Search, AlertTriangle, AlertOctagon, X, MapPin, Camera, Plus, CheckCircle, Trash2, Pause, Play, Maximize2, Users, SlidersHorizontal, ShieldCheck, Volume2, VolumeX } from 'lucide-react';
-import * as tf from '@tensorflow/tfjs';
-import * as cocossd from '@tensorflow-models/coco-ssd';
-import * as poseDetection from '@tensorflow-models/pose-detection';
-
-// Module-level singleton to guarantee AI models load only once across re-renders
-let globalAiModelsPromise = null;
-
-const loadAiModelsSingleton = async (onProgress) => {
-  if (globalAiModelsPromise) return globalAiModelsPromise;
-  globalAiModelsPromise = (async () => {
-    try {
-      await tf.ready();
-      if (onProgress) onProgress('Loading Object & Weapon Detector (COCO-SSD)...');
-      const objectModel = await cocossd.load();
-      if (onProgress) onProgress('Loading Multi-Person MoveNet Pose Engine...');
-      const detectorConfig = {
-        modelType: poseDetection.movenet.modelType.MULTIPOSE_LIGHTNING,
-        enableSmoothing: true,
-        minPoseScore: 0.05
-      };
-      const poseModel = await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, detectorConfig);
-      if (onProgress) onProgress('AI Models Initialized');
-      return { objectModel, poseModel };
-    } catch (err) {
-      globalAiModelsPromise = null; // allow retry on failure
-      throw err;
-    }
-  })();
-  return globalAiModelsPromise;
-};
+import { ThreatEngine, loadAiModels } from '../lib/vision/threatEngine.js';
 
 const LocalWebcam = React.forwardRef((props, ref) => {
   const { onAudioLevel } = props;
@@ -167,7 +138,6 @@ export default function PoliceDashboard() {
   const [liveGatheringCounts, setLiveGatheringCounts] = useState({});
   const [liveSoundLevels, setLiveSoundLevels] = useState({});
   const currentSoundLevelRef = useRef(42);
-  const highNoiseStartRef = useRef(null);
 
   const [showEditThresholdModal, setShowEditThresholdModal] = useState(false);
   const [editingCamera, setEditingCamera] = useState(null);
@@ -189,44 +159,15 @@ export default function PoliceDashboard() {
   const [useLaptopCamera, setUseLaptopCamera] = useState(false);
   const laptopVideoRef = useRef(null);
   const canvasRef = useRef(null);
-  const [model, setModel] = useState(null);
-  const [poseModel, setPoseModel] = useState(null);
-  const modelRef = useRef(null);
-  const poseModelRef = useRef(null);
-  const recentAssaultRef = useRef({}); // Stores assault persistence { timestamp, state, statusLabel, threatScore, strikingLimb, targetZone }
-  const recentGuardRef = useRef({}); // Stores fighting guard stance persistence { timestamp, state, statusLabel, threatScore }
-  const lastGlobalGuardRef = useRef(null); // Fallback single-subject guard memory
-  const lastGlobalAssaultRef = useRef(null); // Fallback single-subject assault memory
-  const recentWeaponsRef = useRef([]); // Stores weapon memory persistence to eliminate single-frame flickering
-  const aiIntervalRef = useRef(null);
-  const poseHistoryRef = useRef([]); // Stores tracked subject keypoints, velocities, and facial dynamics over time
 
   const socketRef = useRef(null);
   const lastAlertTimesRef = useRef({});
 
   useEffect(() => {
-    // Pre-load AI models for instant responsiveness
-    const loadModels = async () => {
-      try {
-        await tf.ready();
-        const loadedObject = await cocossd.load();
-        modelRef.current = loadedObject;
-        setModel(loadedObject);
-        const detectorConfig = {
-          modelType: poseDetection.movenet.modelType.MULTIPOSE_LIGHTNING,
-          enableSmoothing: true,
-          minPoseScore: 0.05
-        };
-        const loadedPose = await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, detectorConfig);
-        poseModelRef.current = loadedPose;
-        setPoseModel(loadedPose);
-
-        // AI models loaded and ready in standby
-      } catch (e) {
-        console.error("Error pre-loading models:", e);
-      }
-    };
-    loadModels();
+    // Warm the shared models up once so the first "Start AI Monitoring" click is fast.
+    loadAiModels((message) => console.info('[AI]', message)).catch((error) => {
+      console.error('Error pre-loading AI models:', error);
+    });
     // Detect Police Location
     if ("geolocation" in navigator) {
       navigator.geolocation.getCurrentPosition(
@@ -356,6 +297,7 @@ export default function PoliceDashboard() {
     const activeCam = (camerasRef.current || []).find(c => c.stream_url === 'LOCAL_WEBCAM') || (camerasRef.current || [])[0];
     const camId = activeCam ? activeCam.camera_id : 'LOCAL_WEBCAM';
     currentSoundLevelRef.current = db;
+    if (engineRef.current) engineRef.current.setSoundLevel(db);
     setLiveSoundLevels(prev => {
       if (prev[camId] && Math.abs(prev[camId] - db) < 2) return prev;
       return { ...prev, [camId]: db };
@@ -576,1207 +518,100 @@ export default function PoliceDashboard() {
     } catch (e) { console.error("Error triggering real AI alert", e); }
   };
 
+  // ───────────────────────────────────────────────────────────────────────
+  // AI threat engine wiring.
+  // All detection logic lives in src/lib/vision/* — this component only
+  // forwards state to the UI and alerts to the API.
+  // ───────────────────────────────────────────────────────────────────────
+  const engineRef = useRef(null);
+  const [engineStatus, setEngineStatus] = useState('idle');
+
+  const activeCamera = () =>
+    (camerasRef.current || []).find((cam) => cam.stream_url === 'LOCAL_WEBCAM') ||
+    (camerasRef.current || [])[0] ||
+    null;
+
+  const getEngine = useCallback(() => {
+    if (engineRef.current) return engineRef.current;
+
+    engineRef.current = new ThreatEngine({
+      onSnapshot: ({ gathering }) => {
+        const cam = activeCamera();
+        if (!cam) return;
+        setLiveGatheringCounts((prev) =>
+          prev[cam.camera_id] === gathering ? prev : { ...prev, [cam.camera_id]: gathering },
+        );
+      },
+      onAlert: (event) => {
+        // Confidence comes from the engine's evidence, never a constant.
+        triggerRealAlert(event.type, event.confidence);
+      },
+      onError: (error) => console.error('ThreatEngine frame error:', error),
+      onStatus: (status) => setEngineStatus(status),
+    });
+
+    return engineRef.current;
+  }, []);
+
   const runRealAI = async () => {
-     try {
-         await tf.ready();
-         
-         // Dynamically load models if pending using refs as primary source
-         let curModel = modelRef.current || model;
-         let curPoseModel = poseModelRef.current || poseModel;
-         if (!curModel) {
-            try {
-               curModel = await cocossd.load();
-               modelRef.current = curModel;
-               setModel(curModel);
-            } catch (e) {
-               console.error("COCO-SSD load error:", e);
-            }
-         }
-         if (!curPoseModel) {
-            try {
-               const detectorConfig = {
-                 modelType: poseDetection.movenet.modelType.MULTIPOSE_LIGHTNING,
-                 enableSmoothing: true,
-                 minPoseScore: 0.05
-               };
-               curPoseModel = await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, detectorConfig);
-               poseModelRef.current = curPoseModel;
-               setPoseModel(curPoseModel);
-            } catch (e) {
-               console.error("MoveNet load error:", e);
-            }
-         }
-         
-         if (aiIntervalRef.current) clearInterval(aiIntervalRef.current);
-         isProcessingRef.current = true;
-
-         // Ensure video is playing
-         if (laptopVideoRef.current && laptopVideoRef.current.paused) {
-            try { await laptopVideoRef.current.play(); } catch(e) {}
-         }
-     
-         aiIntervalRef.current = setInterval(async () => {
-         if (!isProcessingRef.current) return;
-         const currentTime = Date.now();
-         const curModel = modelRef.current || model;
-         const curPoseModel = poseModelRef.current || poseModel;
-         if (laptopVideoRef.current && (laptopVideoRef.current.readyState >= 2 || laptopVideoRef.current.videoWidth > 0)) {
-            const video = laptopVideoRef.current;
-            const canvas = canvasRef.current;
-            const ctx = canvas ? canvas.getContext('2d') : null;
-            
-            if (canvas && ctx) {
-                if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
-                    canvas.width = video.videoWidth || 640;
-                    canvas.height = video.videoHeight || 480;
-                }
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-                ctx.font = '16px Arial';
-            }
-
-            // A. Object Detection for Real Weapons (Knives, Blades, Scissors, Bats)
-            let predictions = [];
-            if (curModel) {
-                try {
-                    // Pass 30 max boxes and 0.05 minScore so coco-ssd returns sensitive knife/weapon detections!
-                    predictions = await curModel.detect(video, 30, 0.05);
-                } catch (detErr) {
-                    console.warn("Detection frame error:", detErr);
-                }
-            }
-            const bladeClasses = ['knife', 'scissors', 'fork', 'spoon', 'toothbrush'];
-            const bluntClasses = ['baseball bat', 'bottle'];
-            const rawDetectedWeapons = [];
-
-            for (let p of predictions) {
-                const isBlade = bladeClasses.includes(p.class) && p.score >= 0.05;
-                const isBlunt = bluntClasses.includes(p.class) && (p.class === 'bottle' ? p.score >= 0.25 : p.score >= 0.10);
-
-                if (isBlade || isBlunt) {
-                    const displayClass = (p.class === 'fork' || p.class === 'scissors' || p.class === 'spoon' || p.class === 'toothbrush') ? 'knife' : p.class;
-                    rawDetectedWeapons.push({ ...p, displayClass, timestamp: currentTime });
-                }
-            }
-
-            // Weapon memory persistence: retain detected weapons for 2.2 seconds to eliminate single-frame flickering
-            let detectedWeapons = [];
-            if (rawDetectedWeapons.length > 0) {
-                recentWeaponsRef.current = rawDetectedWeapons;
-                detectedWeapons = rawDetectedWeapons;
-            } else if (recentWeaponsRef.current && recentWeaponsRef.current.length > 0) {
-                detectedWeapons = recentWeaponsRef.current.filter(w => (currentTime - (w.timestamp || 0)) < 2200);
-            }
-
-            // Render Weapon HUD Highlights on Canvas immediately
-            for (let wp of detectedWeapons) {
-                if (ctx) {
-                    ctx.save();
-                    ctx.strokeStyle = '#ef4444';
-                    ctx.lineWidth = 3.5;
-                    ctx.shadowColor = '#ef4444';
-                    ctx.shadowBlur = 14;
-                    ctx.strokeRect(...wp.bbox);
-
-                    ctx.fillStyle = 'rgba(239, 68, 68, 0.95)';
-                    const labelY = wp.bbox[1] > 26 ? wp.bbox[1] - 24 : wp.bbox[1];
-                    const labelText = `⚠️ WEAPON: ${wp.displayClass.toUpperCase()} (${Math.round(wp.score * 100)}%)`;
-                    ctx.font = 'bold 12px sans-serif';
-                    const textW = ctx.measureText(labelText).width;
-                    ctx.fillRect(wp.bbox[0], labelY, Math.max(wp.bbox[2], textW + 16), 22);
-
-                    ctx.fillStyle = '#ffffff';
-                    ctx.fillText(labelText, wp.bbox[0] + 6, labelY + 16);
-                    ctx.restore();
-                }
-            }
-            
-            // B. Multi-Person MoveNet Pose Estimation
-            let poses = [];
-            if (curPoseModel) {
-                try {
-                    poses = await curPoseModel.estimatePoses(video, {
-                        maxPoses: 6,
-                        flipHorizontal: false
-                    });
-                } catch (poseErr) {
-                    console.warn("Pose estimation error:", poseErr);
-                }
-            }
-            
-            // Filter valid poses with relaxed confidence threshold (0.04)
-            const validPoses = (poses || []).filter(p => {
-                if (!p.keypoints || p.keypoints.length === 0) return false;
-                const goodPts = p.keypoints.filter(k => k.score > 0.04);
-                return (p.score && p.score > 0.03) || goodPts.length >= 2;
-            });
-
-            // C. Live Crowd / Gathering Count & Real-time Threshold Breach Check
-            const detectedPersons = predictions.filter(p => p.class === 'person' && p.score >= 0.20);
-            
-            // Fallback synthesis: ONLY synthesize a pose if MoveNet failed to detect any person at all!
-            // This prevents creating a duplicate phantom 2nd person on top of a single user.
-            if (validPoses.length === 0 && detectedPersons.length > 0) {
-                detectedPersons.forEach(dp => {
-                    const [bx, by, bw, bh] = dp.bbox;
-                    validPoses.push({
-                        score: dp.score,
-                        keypoints: [
-                            { name: 'nose', x: bx + bw * 0.5, y: by + bh * 0.16, score: 0.8 },
-                            { name: 'left_shoulder', x: bx + bw * 0.3, y: by + bh * 0.28, score: 0.8 },
-                            { name: 'right_shoulder', x: bx + bw * 0.7, y: by + bh * 0.28, score: 0.8 },
-                            { name: 'left_elbow', x: bx + bw * 0.22, y: by + bh * 0.42, score: 0.7 },
-                            { name: 'right_elbow', x: bx + bw * 0.78, y: by + bh * 0.42, score: 0.7 },
-                            { name: 'left_wrist', x: bx + bw * 0.25, y: by + bh * 0.52, score: 0.6 },
-                            { name: 'right_wrist', x: bx + bw * 0.75, y: by + bh * 0.52, score: 0.6 },
-                            { name: 'left_hip', x: bx + bw * 0.35, y: by + bh * 0.58, score: 0.8 },
-                            { name: 'right_hip', x: bx + bw * 0.65, y: by + bh * 0.58, score: 0.8 },
-                            { name: 'left_knee', x: bx + bw * 0.35, y: by + bh * 0.78, score: 0.7 },
-                            { name: 'right_knee', x: bx + bw * 0.65, y: by + bh * 0.78, score: 0.7 },
-                            { name: 'left_ankle', x: bx + bw * 0.35, y: by + bh * 0.95, score: 0.8 },
-                            { name: 'right_ankle', x: bx + bw * 0.65, y: by + bh * 0.95, score: 0.8 }
-                        ],
-                        box: { xMin: bx, yMin: by, xMax: bx + bw, yMax: by + bh, width: bw, height: bh }
-                    });
-                });
-            }
-
-            // Guaranteed tracking frame: if user is on camera but models are warm-starting
-            if (validPoses.length === 0 && detectedPersons.length === 0) {
-                window.emptyFramesCount = (window.emptyFramesCount || 0) + 1;
-                if (window.emptyFramesCount > 4) {
-                    const bw = Math.round((video.videoWidth || 640) * 0.55);
-                    const bh = Math.round((video.videoHeight || 480) * 0.75);
-                    const bx = Math.round(((video.videoWidth || 640) - bw) / 2);
-                    const by = Math.round((video.videoHeight || 480) * 0.15);
-                    validPoses.push({
-                        score: 0.70,
-                        keypoints: [
-                            { name: 'nose', x: bx + bw * 0.5, y: by + bh * 0.18, score: 0.8 },
-                            { name: 'left_shoulder', x: bx + bw * 0.28, y: by + bh * 0.35, score: 0.8 },
-                            { name: 'right_shoulder', x: bx + bw * 0.72, y: by + bh * 0.35, score: 0.8 },
-                            { name: 'left_elbow', x: bx + bw * 0.20, y: by + bh * 0.55, score: 0.7 },
-                            { name: 'right_elbow', x: bx + bw * 0.80, y: by + bh * 0.55, score: 0.7 },
-                            { name: 'left_wrist', x: bx + bw * 0.25, y: by + bh * 0.68, score: 0.6 },
-                            { name: 'right_wrist', x: bx + bw * 0.75, y: by + bh * 0.68, score: 0.6 },
-                            { name: 'left_hip', x: bx + bw * 0.32, y: by + bh * 0.75, score: 0.8 },
-                            { name: 'right_hip', x: bx + bw * 0.68, y: by + bh * 0.75, score: 0.8 }
-                        ],
-                        box: { xMin: bx, yMin: by, width: bw, height: bh }
-                    });
-                }
-            } else {
-                window.emptyFramesCount = 0;
-            }
-
-            const currentGatheringCount = validPoses.length > 0 ? validPoses.length : detectedPersons.length;
-
-            // Read live from camerasRef so changes made midway update instantaneously without reload!
-            const currentCams = camerasRef.current || [];
-            const activeCam = currentCams.find(c => c.stream_url === 'LOCAL_WEBCAM') || currentCams[0];
-            const gatheringThreshold = (activeCam && activeCam.gathering_threshold) ? Number(activeCam.gathering_threshold) : 5;
-            const soundThreshold = (activeCam && activeCam.sound_threshold) ? Number(activeCam.sound_threshold) : 75;
-
-            if (activeCam) {
-                setLiveGatheringCounts(prev => ({
-                    ...prev,
-                    [activeCam.camera_id]: currentGatheringCount
-                }));
-            }
-
-            const isOvercrowded = currentGatheringCount > gatheringThreshold;
-
-            // D. Real-time Acoustic Noise Check & Sustained High Noise Duration
-            const currentSound = currentSoundLevelRef.current || 42;
-            const isNoiseOverLimit = currentSound > soundThreshold;
-
-            if (isNoiseOverLimit) {
-                if (!highNoiseStartRef.current) {
-                    highNoiseStartRef.current = Date.now();
-                }
-            } else {
-                highNoiseStartRef.current = null;
-            }
-
-            const sustainedNoiseDuration = highNoiseStartRef.current ? (Date.now() - highNoiseStartRef.current) : 0;
-            const isSustainedNoiseBreach = isNoiseOverLimit && sustainedNoiseDuration >= 1500;
-
-            // Sort persons Left-to-Right for stable Person 1, Person 2... labeling
-            validPoses.sort((a, b) => {
-                const getX = (pose) => {
-                    if (pose.box && typeof pose.box.xMin === 'number') return pose.box.xMin;
-                    const nose = pose.keypoints.find(k => k.name === 'nose');
-                    if (nose && nose.score > 0.08) return nose.x;
-                    const shoulder = pose.keypoints.find(k => k.name === 'left_shoulder' || k.name === 'right_shoulder');
-                    if (shoulder && shoulder.score > 0.08) return shoulder.x;
-                    const first = pose.keypoints.find(k => k.score > 0.08);
-                    return first ? first.x : 0;
-                };
-                return getX(a) - getX(b);
-            });
-
-            // Build rich metadata for each detected subject
-            const personEntities = validPoses.map((p, idx) => {
-                const kpMap = {};
-                p.keypoints.forEach(k => { kpMap[k.name] = k; });
-
-                const nose = kpMap['nose'];
-                const leftShoulder = kpMap['left_shoulder'];
-                const rightShoulder = kpMap['right_shoulder'];
-                const leftElbow = kpMap['left_elbow'];
-                const rightElbow = kpMap['right_elbow'];
-                const leftWrist = kpMap['left_wrist'];
-                const rightWrist = kpMap['right_wrist'];
-                const leftHip = kpMap['left_hip'];
-                const rightHip = kpMap['right_hip'];
-                const leftKnee = kpMap['left_knee'];
-                const rightKnee = kpMap['right_knee'];
-                const leftAnkle = kpMap['left_ankle'];
-                const rightAnkle = kpMap['right_ankle'];
-
-                // Centroid & adaptive scale calculation
-                let centerX = 0, centerY = 0;
-                let shoulderWidth = 80;
-
-                if (leftShoulder && rightShoulder && leftShoulder.score > 0.08 && rightShoulder.score > 0.08) {
-                    centerX = (leftShoulder.x + rightShoulder.x) / 2;
-                    centerY = (leftShoulder.y + rightShoulder.y) / 2;
-                    shoulderWidth = Math.hypot(rightShoulder.x - leftShoulder.x, rightShoulder.y - leftShoulder.y);
-                } else if (nose && nose.score > 0.08) {
-                    centerX = nose.x;
-                    centerY = nose.y + 45;
-                } else if (p.box) {
-                    centerX = p.box.xMin + p.box.width / 2;
-                    centerY = p.box.yMin + p.box.height * 0.35;
-                    shoulderWidth = p.box.width * 0.45;
-                } else {
-                    const validPts = p.keypoints.filter(k => k.score > 0.08);
-                    if (validPts.length > 0) {
-                        centerX = validPts.reduce((acc, k) => acc + k.x, 0) / validPts.length;
-                        centerY = validPts.reduce((acc, k) => acc + k.y, 0) / validPts.length;
-                    }
-                }
-
-                shoulderWidth = Math.max(shoulderWidth, 60);
-
-                const headX = (nose && nose.score > 0.08) ? nose.x : centerX;
-                const headY = (nose && nose.score > 0.08) ? nose.y : (centerY - shoulderWidth * 0.45);
-
-                const hipY = (leftHip && rightHip && leftHip.score > 0.08 && rightHip.score > 0.08)
-                    ? (leftHip.y + rightHip.y) / 2
-                    : (centerY + shoulderWidth * 0.95);
-
-                // Robust limb extrapolation: If wrist confidence drops during fast motion but elbow and shoulder are confident,
-                // extrapolate hand position intelligently (upwards if in guard/punch, or along forearm vector)!
-                let effLeftWrist = (leftWrist && leftWrist.score > 0.03) ? leftWrist : null;
-                if (!effLeftWrist && leftElbow && leftElbow.score > 0.08 && leftShoulder && leftShoulder.score > 0.08) {
-                    const isElbowRaised = leftElbow.y < (leftShoulder.y + 35);
-                    effLeftWrist = {
-                        name: 'left_wrist',
-                        x: isElbowRaised ? (leftElbow.x + (centerX - leftElbow.x) * 0.4) : (leftElbow.x + (leftElbow.x - leftShoulder.x) * 0.8),
-                        y: isElbowRaised ? (leftElbow.y - shoulderWidth * 0.45) : (leftElbow.y + (leftElbow.y - leftShoulder.y) * 0.8),
-                        score: 0.25,
-                        isExtrapolated: true
-                    };
-                }
-
-                let effRightWrist = (rightWrist && rightWrist.score > 0.03) ? rightWrist : null;
-                if (!effRightWrist && rightElbow && rightElbow.score > 0.08 && rightShoulder && rightShoulder.score > 0.08) {
-                    const isElbowRaised = rightElbow.y < (rightShoulder.y + 35);
-                    effRightWrist = {
-                        name: 'right_wrist',
-                        x: isElbowRaised ? (rightElbow.x + (centerX - rightElbow.x) * 0.4) : (rightElbow.x + (rightElbow.x - rightShoulder.x) * 0.8),
-                        y: isElbowRaised ? (rightElbow.y - shoulderWidth * 0.45) : (rightElbow.y + (rightElbow.y - rightShoulder.y) * 0.8),
-                        score: 0.25,
-                        isExtrapolated: true
-                    };
-                }
-
-                return {
-                    id: idx + 1,
-                    pose: p,
-                    keypoints: p.keypoints,
-                    kpMap,
-                    centerX,
-                    centerY,
-                    headX,
-                    headY,
-                    hipY,
-                    shoulderWidth,
-                    nose, leftShoulder, rightShoulder, leftElbow, rightElbow,
-                    leftWrist: effLeftWrist,
-                    rightWrist: effRightWrist,
-                    leftHip, rightHip, leftKnee, rightKnee, leftAnkle, rightAnkle,
-                    state: 'NORMAL',
-                    statusLabel: 'Normal',
-                    threatScore: 0,
-                    strikingTargetId: null,
-                    strikingLimb: null,
-                    targetZone: '',
-                    armedWeapon: null,
-                    vLeftWrist: 0,
-                    vRightWrist: 0,
-                    vLeftElbow: 0,
-                    vRightElbow: 0,
-                    vLeftAnkle: 0,
-                    vRightAnkle: 0,
-                    vLeftKnee: 0,
-                    vRightKnee: 0,
-                    vHead: 0,
-                    armExtL: 0,
-                    armExtR: 0,
-                    dExtL: 0,
-                    dExtR: 0
-                };
-            });
-
-            // 1. Temporal Motion Tracking & Kinetic Velocity Calculation (Wrists, Elbows, Head, Knees, Ankles)
-            // (currentTime recorded at tick start)
-            const prevHistory = poseHistoryRef.current || [];
-            const updatedHistory = [];
-
-            personEntities.forEach(pe => {
-                let bestMatch = null;
-                let minCentroidDist = Infinity;
-
-                prevHistory.forEach(prev => {
-                    const dist = Math.hypot(pe.centerX - prev.centerX, pe.centerY - prev.centerY);
-                    if (dist < minCentroidDist) {
-                        minCentroidDist = dist;
-                        bestMatch = prev;
-                    }
-                });
-
-                let dt = 0.16;
-                let vLW = 0, vRW = 0, vLE = 0, vRE = 0, vHead = 0;
-                let vLA = 0, vRA = 0, vLK = 0, vRK = 0;
-                let dExtL = 0, dExtR = 0;
-
-                const shoulderPtL = pe.leftShoulder || { x: pe.centerX, y: pe.centerY };
-                const shoulderPtR = pe.rightShoulder || { x: pe.centerX, y: pe.centerY };
-                const armExtL = pe.leftWrist ? Math.hypot(pe.leftWrist.x - shoulderPtL.x, pe.leftWrist.y - shoulderPtL.y) : 0;
-                const armExtR = pe.rightWrist ? Math.hypot(pe.rightWrist.x - shoulderPtR.x, pe.rightWrist.y - shoulderPtR.y) : 0;
-                pe.armExtL = Math.round(armExtL);
-                pe.armExtR = Math.round(armExtR);
-
-                if (bestMatch && minCentroidDist < pe.shoulderWidth * 3.5) {
-                    dt = Math.max(0.05, (currentTime - bestMatch.timestamp) / 1000);
-
-                    // Wrists velocity (Punches)
-                    if (pe.leftWrist && bestMatch.leftWrist) {
-                        vLW = Math.hypot(pe.leftWrist.x - bestMatch.leftWrist.x, pe.leftWrist.y - bestMatch.leftWrist.y) / dt;
-                    }
-                    if (pe.rightWrist && bestMatch.rightWrist) {
-                        vRW = Math.hypot(pe.rightWrist.x - bestMatch.rightWrist.x, pe.rightWrist.y - bestMatch.rightWrist.y) / dt;
-                    }
-                    // Elbows velocity (Forearm thrusts)
-                    if (pe.leftElbow && pe.leftElbow.score > 0.08 && bestMatch.leftElbow) {
-                        vLE = Math.hypot(pe.leftElbow.x - bestMatch.leftElbow.x, pe.leftElbow.y - bestMatch.leftElbow.y) / dt;
-                    }
-                    if (pe.rightElbow && pe.rightElbow.score > 0.08 && bestMatch.rightElbow) {
-                        vRE = Math.hypot(pe.rightElbow.x - bestMatch.rightElbow.x, pe.rightElbow.y - bestMatch.rightElbow.y) / dt;
-                    }
-                    // Extension rate of change (Thrust acceleration)
-                    if (bestMatch.armExtL !== undefined) {
-                        dExtL = Math.abs(armExtL - bestMatch.armExtL) / dt;
-                    }
-                    if (bestMatch.armExtR !== undefined) {
-                        dExtR = Math.abs(armExtR - bestMatch.armExtR) / dt;
-                    }
-                    // Ankles velocity (Kicks)
-                    if (pe.leftAnkle && pe.leftAnkle.score > 0.08 && bestMatch.leftAnkle) {
-                        vLA = Math.hypot(pe.leftAnkle.x - bestMatch.leftAnkle.x, pe.leftAnkle.y - bestMatch.leftAnkle.y) / dt;
-                    }
-                    if (pe.rightAnkle && pe.rightAnkle.score > 0.08 && bestMatch.rightAnkle) {
-                        vRA = Math.hypot(pe.rightAnkle.x - bestMatch.rightAnkle.x, pe.rightAnkle.y - bestMatch.rightAnkle.y) / dt;
-                    }
-                    // Knees velocity (Knee strikes)
-                    if (pe.leftKnee && pe.leftKnee.score > 0.08 && bestMatch.leftKnee) {
-                        vLK = Math.hypot(pe.leftKnee.x - bestMatch.leftKnee.x, pe.leftKnee.y - bestMatch.leftKnee.y) / dt;
-                    }
-                    if (pe.rightKnee && pe.rightKnee.score > 0.08 && bestMatch.rightKnee) {
-                        vRK = Math.hypot(pe.rightKnee.x - bestMatch.rightKnee.x, pe.rightKnee.y - bestMatch.rightKnee.y) / dt;
-                    }
-
-                    const dHeadX = pe.headX - bestMatch.headX;
-                    const dHeadY = pe.headY - bestMatch.headY;
-                    vHead = Math.hypot(dHeadX, dHeadY) / dt;
-                }
-
-                pe.vLeftWrist = Math.round(vLW);
-                pe.vRightWrist = Math.round(vRW);
-                pe.vLeftElbow = Math.round(vLE);
-                pe.vRightElbow = Math.round(vRE);
-                pe.dExtL = Math.round(dExtL);
-                pe.dExtR = Math.round(dExtR);
-                pe.vLeftAnkle = Math.round(vLA);
-                pe.vRightAnkle = Math.round(vRA);
-                pe.vLeftKnee = Math.round(vLK);
-                pe.vRightKnee = Math.round(vRK);
-                pe.vHead = Math.round(vHead);
-
-                updatedHistory.push({
-                    id: pe.id,
-                    centerX: pe.centerX,
-                    centerY: pe.centerY,
-                    headX: pe.headX,
-                    headY: pe.headY,
-                    leftWrist: pe.leftWrist ? { x: pe.leftWrist.x, y: pe.leftWrist.y } : null,
-                    rightWrist: pe.rightWrist ? { x: pe.rightWrist.x, y: pe.rightWrist.y } : null,
-                    leftElbow: pe.leftElbow ? { x: pe.leftElbow.x, y: pe.leftElbow.y } : null,
-                    rightElbow: pe.rightElbow ? { x: pe.rightElbow.x, y: pe.rightElbow.y } : null,
-                    armExtL,
-                    armExtR,
-                    leftAnkle: pe.leftAnkle ? { x: pe.leftAnkle.x, y: pe.leftAnkle.y } : null,
-                    rightAnkle: pe.rightAnkle ? { x: pe.rightAnkle.x, y: pe.rightAnkle.y } : null,
-                    leftKnee: pe.leftKnee ? { x: pe.leftKnee.x, y: pe.leftKnee.y } : null,
-                    rightKnee: pe.rightKnee ? { x: pe.rightKnee.x, y: pe.rightKnee.y } : null,
-                    timestamp: currentTime
-                });
-            });
-
-            poseHistoryRef.current = updatedHistory;
-
-            // 2. Firearm / Gun Aiming Stance Recognition (Two-Handed Shooting Stance)
-            personEntities.forEach(pe => {
-                const wL = pe.leftWrist;
-                const wR = pe.rightWrist;
-                if (wL && wR) {
-                    const wristDist = Math.hypot(wL.x - wR.x, wL.y - wR.y);
-                    const shoulderL = pe.leftShoulder || { x: pe.centerX, y: pe.centerY };
-                    const shoulderR = pe.rightShoulder || { x: pe.centerX, y: pe.centerY };
-                    const extL = Math.hypot(wL.x - shoulderL.x, wL.y - shoulderL.y);
-                    const extR = Math.hypot(wR.x - shoulderR.x, wR.y - shoulderR.y);
-                    const avgExt = (extL + extR) / 2;
-
-                    // Both hands locked together in front of body, pushed outward at chest/shoulder level
-                    const isHandsTogether = wristDist < pe.shoulderWidth * 0.65;
-                    const isArmsExtended = avgExt > pe.shoulderWidth * 0.45;
-                    const isChestHeight = Math.abs(wL.y - pe.centerY) < pe.shoulderWidth * 0.85;
-
-                    if (isHandsTogether && isArmsExtended && isChestHeight) {
-                        pe.state = 'ARMED';
-                        pe.armedWeapon = 'FIREARM / GUN AIMING';
-                        pe.statusLabel = `⚠️ WEAPON: FIREARM AIMING`;
-                        pe.threatScore = 0.95;
-                    }
-                }
-            });
-
-            // 3. Object Detection Weapon Binding with closest person
-            detectedWeapons.forEach(w => {
-                const [wX, wY, wW, wH] = w.bbox;
-                const wCenterX = wX + wW / 2;
-                const wCenterY = wY + wH / 2;
-
-                let closestPerson = null;
-                let minDist = Infinity;
-
-                personEntities.forEach(pe => {
-                    const dL = pe.leftWrist ? Math.hypot(pe.leftWrist.x - wCenterX, pe.leftWrist.y - wCenterY) : Infinity;
-                    const dR = pe.rightWrist ? Math.hypot(pe.rightWrist.x - wCenterX, pe.rightWrist.y - wCenterY) : Infinity;
-                    const dC = Math.hypot(pe.centerX - wCenterX, pe.centerY - wCenterY);
-                    const d = Math.min(dL, dR, dC);
-                    if (d < minDist) {
-                        minDist = d;
-                        closestPerson = pe;
-                    }
-                });
-
-                if (closestPerson && minDist < closestPerson.shoulderWidth * 3.2) {
-                    closestPerson.state = 'ARMED';
-                    const wpName = w.displayClass || w.class || 'knife';
-                    closestPerson.armedWeapon = wpName;
-                    closestPerson.statusLabel = `ARMED: ${wpName.toUpperCase()}`;
-                    closestPerson.threatScore = Math.max(closestPerson.threatScore, w.score, 0.94);
-                }
-            });
-
-            // 4. PUNCH & PHYSICAL STRIKE DETECTION (Works for SOLO punches in front of webcam and multi-person strikes)
-            personEntities.forEach(pe => {
-                if (pe.state === 'ARMED') return;
-
-                const shoulderPtL = pe.leftShoulder || { x: pe.centerX, y: pe.centerY };
-                const shoulderPtR = pe.rightShoulder || { x: pe.centerX, y: pe.centerY };
-
-                const armExtL = pe.leftWrist ? Math.hypot(pe.leftWrist.x - shoulderPtL.x, pe.leftWrist.y - shoulderPtL.y) : 0;
-                const armExtR = pe.rightWrist ? Math.hypot(pe.rightWrist.x - shoulderPtR.x, pe.rightWrist.y - shoulderPtR.y) : 0;
-
-                const distCenterL = pe.leftWrist ? Math.hypot(pe.leftWrist.x - pe.centerX, pe.leftWrist.y - pe.centerY) / pe.shoulderWidth : 0;
-                const distCenterR = pe.rightWrist ? Math.hypot(pe.rightWrist.x - pe.centerX, pe.rightWrist.y - pe.centerY) / pe.shoulderWidth : 0;
-
-                // Sensitive, robust multi-criteria punch detection:
-                // 1) Outward extension thrust (> 0.35 * shoulderWidth) + elevated arm
-                // 2) Kinetic velocity strike (wrist >= 15 px/s OR elbow >= 14 px/s)
-                // 3) Rapid extension rate of change (thrust snap >= 10 px/s)
-                // 4) Z-axis forward punch straight at camera (distCenter < 0.85 & velocity/thrust >= 14)
-                // 5) High snap speed (wrist >= 24 px/s OR elbow >= 20 px/s)
-                // 6) Extended fist held out at chest/head level (armExt > 0.48 * shoulderWidth)
-                const activeLimbL = pe.leftWrist || pe.leftElbow;
-                const isPunchL = activeLimbL && (
-                    (pe.vLeftWrist >= 15 && armExtL > pe.shoulderWidth * 0.28) ||
-                    (armExtL > pe.shoulderWidth * 0.38 && (pe.vLeftWrist >= 12 || pe.dExtL >= 10)) ||
-                    (pe.vLeftElbow >= 14 && (pe.leftElbow ? pe.leftElbow.y < pe.centerY + 45 : true)) ||
-                    (pe.vLeftWrist >= 24) ||
-                    (pe.vLeftElbow >= 20) ||
-                    (distCenterL < 0.85 && (pe.vLeftWrist >= 14 || pe.vLeftElbow >= 14 || pe.dExtL >= 10)) ||
-                    (armExtL > pe.shoulderWidth * 0.52 && (pe.leftWrist ? pe.leftWrist.y < pe.centerY + 40 : true))
-                );
-
-                const activeLimbR = pe.rightWrist || pe.rightElbow;
-                const isPunchR = activeLimbR && (
-                    (pe.vRightWrist >= 15 && armExtR > pe.shoulderWidth * 0.28) ||
-                    (armExtR > pe.shoulderWidth * 0.38 && (pe.vRightWrist >= 12 || pe.dExtR >= 10)) ||
-                    (pe.vRightElbow >= 14 && (pe.rightElbow ? pe.rightElbow.y < pe.centerY + 45 : true)) ||
-                    (pe.vRightWrist >= 24) ||
-                    (pe.vRightElbow >= 20) ||
-                    (distCenterR < 0.85 && (pe.vRightWrist >= 14 || pe.vRightElbow >= 14 || pe.dExtR >= 10)) ||
-                    (armExtR > pe.shoulderWidth * 0.52 && (pe.rightWrist ? pe.rightWrist.y < pe.centerY + 40 : true))
-                );
-
-                if (isPunchL || isPunchR) {
-                    const maxV = Math.max(pe.vLeftWrist, pe.vRightWrist, pe.vLeftElbow, pe.vRightElbow, 35);
-                    pe.state = 'AGGRESSOR';
-                    pe.statusLabel = `🥊 Punch Strike (${maxV} px/s)`;
-                    pe.threatScore = Math.min(0.98, 0.88 + (maxV / 300) * 0.10);
-                    pe.strikingLimb = isPunchR ? (pe.rightWrist || pe.rightElbow) : (pe.leftWrist || pe.leftElbow);
-                    pe.targetZone = 'Fist';
-
-                    const assaultData = {
-                        timestamp: currentTime,
-                        state: 'AGGRESSOR',
-                        statusLabel: pe.statusLabel,
-                        threatScore: pe.threatScore,
-                        strikingLimb: pe.strikingLimb,
-                        targetZone: 'Fist'
-                    };
-                    recentAssaultRef.current[pe.id] = assaultData;
-                    lastGlobalAssaultRef.current = assaultData;
-                }
-            });
-
-            // 5. KICK DETECTION (Ankle / Knee elevation + explosive kinetic velocity)
-            personEntities.forEach(pe => {
-                if (pe.state === 'ARMED' || pe.state === 'AGGRESSOR') return;
-
-                const isAnkleElevatedL = pe.leftAnkle && pe.leftAnkle.score > 0.06 && (pe.leftAnkle.y < pe.hipY + 60 || Math.abs(pe.leftAnkle.x - pe.centerX) > pe.shoulderWidth * 0.80);
-                const isAnkleElevatedR = pe.rightAnkle && pe.rightAnkle.score > 0.06 && (pe.rightAnkle.y < pe.hipY + 60 || Math.abs(pe.rightAnkle.x - pe.centerX) > pe.shoulderWidth * 0.80);
-
-                const isKneeElevatedL = pe.leftKnee && pe.leftKnee.score > 0.06 && (pe.leftKnee.y < pe.hipY + 45);
-                const isKneeElevatedR = pe.rightKnee && pe.rightKnee.score > 0.06 && (pe.rightKnee.y < pe.hipY + 45);
-
-                const isKickMotionL = (isAnkleElevatedL && pe.vLeftAnkle >= 20) || (isKneeElevatedL && pe.vLeftKnee >= 18);
-                const isKickMotionR = (isAnkleElevatedR && pe.vRightAnkle >= 20) || (isKneeElevatedR && pe.vRightKnee >= 18);
-
-                if (isKickMotionL || isKickMotionR) {
-                    const kickV = Math.max(pe.vLeftAnkle, pe.vRightAnkle, pe.vLeftKnee, pe.vRightKnee, 30);
-                    pe.state = 'AGGRESSOR';
-                    pe.statusLabel = `🥋 Kick Strike (${kickV} px/s)`;
-                    pe.threatScore = Math.min(0.99, 0.90 + (kickV / 400) * 0.09);
-                    pe.strikingLimb = isKickMotionR ? (pe.rightAnkle || pe.rightKnee) : (pe.leftAnkle || pe.leftKnee);
-                    pe.targetZone = 'Leg';
-
-                    const kickData = {
-                        timestamp: currentTime,
-                        state: 'AGGRESSOR',
-                        statusLabel: pe.statusLabel,
-                        threatScore: pe.threatScore,
-                        strikingLimb: pe.strikingLimb,
-                        targetZone: 'Leg'
-                    };
-                    recentAssaultRef.current[pe.id] = kickData;
-                    lastGlobalAssaultRef.current = kickData;
-                }
-            });
-
-            // 6. BOXING / FIGHTING GUARD STANCE RECOGNITION (Fists or forearms held up in combat/guard position)
-            personEntities.forEach(pe => {
-                if (pe.state === 'NORMAL') {
-                    const wL = pe.leftWrist;
-                    const wR = pe.rightWrist;
-                    const eL = pe.leftElbow;
-                    const eR = pe.rightElbow;
-
-                    const checkGuardLimb = (limb) => {
-                        if (!limb) return false;
-                        const isElevated = limb.y <= (pe.centerY + pe.shoulderWidth * 0.40) && limb.y >= (pe.headY - 90);
-                        const isInFront = Math.abs(limb.x - pe.centerX) < pe.shoulderWidth * 1.6;
-                        return isElevated && isInFront;
-                    };
-
-                    const isFistGuardL = checkGuardLimb(wL) || (eL && eL.score > 0.08 && eL.y < pe.centerY + 30);
-                    const isFistGuardR = checkGuardLimb(wR) || (eR && eR.score > 0.08 && eR.y < pe.centerY + 30);
-
-                    const areElbowsRaised = eL && eR && eL.score > 0.08 && eR.score > 0.08 &&
-                        (eL.y < pe.centerY + 35 && eR.y < pe.centerY + 35) &&
-                        (Math.abs(eL.x - eR.x) < pe.shoulderWidth * 1.8);
-
-                    let guardDetected = false;
-                    let label = '';
-                    let score = 0.88;
-
-                    if (isFistGuardL && isFistGuardR) {
-                        guardDetected = true;
-                        label = `🥊 Boxing Guard / Fighting Stance`;
-                        score = 0.92;
-                    } else if (isFistGuardL || isFistGuardR) {
-                        guardDetected = true;
-                        label = `🥊 Fighting Guard Stance`;
-                        score = 0.88;
-                    } else if (areElbowsRaised) {
-                        guardDetected = true;
-                        label = `🥊 Combat Ready Guard`;
-                        score = 0.85;
-                    }
-
-                    if (guardDetected) {
-                        pe.state = 'COMBAT_POSE';
-                        pe.statusLabel = label;
-                        pe.threatScore = score;
-
-                        const guardData = {
-                            timestamp: currentTime,
-                            state: 'COMBAT_POSE',
-                            statusLabel: label,
-                            threatScore: score
-                        };
-                        recentGuardRef.current[pe.id] = guardData;
-                        lastGlobalGuardRef.current = guardData;
-                    }
-                }
-            });
-
-            // Apply Assault & Guard Memory (Assault held for 3.0s, Guard held for 2.2s so detection doesn't flicker away!)
-            personEntities.forEach(pe => {
-                const pastAssault = recentAssaultRef.current[pe.id] || (personEntities.length === 1 ? lastGlobalAssaultRef.current : null);
-                const pastGuard = recentGuardRef.current[pe.id] || (personEntities.length === 1 ? lastGlobalGuardRef.current : null);
-
-                if (pastAssault && (currentTime - pastAssault.timestamp) < 3000) {
-                    pe.state = pastAssault.state;
-                    pe.statusLabel = pastAssault.statusLabel;
-                    pe.threatScore = Math.max(pe.threatScore, pastAssault.threatScore);
-                    pe.strikingLimb = pastAssault.strikingLimb;
-                    pe.targetZone = pastAssault.targetZone;
-                } else if (pe.state === 'NORMAL' && pastGuard && (currentTime - pastGuard.timestamp) < 2200) {
-                    pe.state = pastGuard.state;
-                    pe.statusLabel = pastGuard.statusLabel;
-                    pe.threatScore = Math.max(pe.threatScore, pastGuard.threatScore);
-                }
-            });
-
-            // 7. MULTI-PERSON TARGETING & BRAWL CONFRONTATION
-            const strikes = [];
-            if (personEntities.length >= 2) {
-                for (let i = 0; i < personEntities.length; i++) {
-                    const p1 = personEntities[i];
-                    for (let j = 0; j < personEntities.length; j++) {
-                        if (i === j) continue;
-                        const p2 = personEntities[j];
-
-                        const distCenters = Math.hypot(p1.centerX - p2.centerX, p1.centerY - p2.centerY);
-                        const avgScale = (p1.shoulderWidth + p2.shoulderWidth) / 2;
-
-                        // Check if Person 1's wrists or elbows reach into Person 2's head/chest area
-                        const checkWristStrike = (wrist) => {
-                            if (!wrist) return false;
-                            const dHead = Math.hypot(wrist.x - p2.headX, wrist.y - p2.headY);
-                            const dChest = Math.hypot(wrist.x - p2.centerX, wrist.y - p2.centerY);
-                            return dHead < p2.shoulderWidth * 0.95 || dChest < p2.shoulderWidth * 0.95;
-                        };
-
-                        const isWristStrikeL = checkWristStrike(p1.leftWrist);
-                        const isWristStrikeR = checkWristStrike(p1.rightWrist);
-                        const isDirectPhysicalContact = isWristStrikeL || isWristStrikeR;
-
-                        if (distCenters < avgScale * 3.2 && (p1.state === 'AGGRESSOR' || isDirectPhysicalContact)) {
-                            const limbPt = isWristStrikeR ? (p1.rightWrist || p1.strikingLimb) : (p1.leftWrist || p1.strikingLimb || { x: p1.centerX, y: p1.centerY });
-                            const victimPt = { x: p2.centerX, y: p2.headY || p2.centerY };
-                            
-                            strikes.push({
-                                attackerId: p1.id,
-                                victimId: p2.id,
-                                attackerLimb: limbPt,
-                                victimTarget: victimPt,
-                                type: p1.targetZone === 'Leg' ? 'KICK' : 'PUNCH',
-                                speed: p1.statusLabel,
-                                confidence: Math.max(0.92, p1.threatScore)
-                            });
-
-                            p1.state = 'AGGRESSOR';
-                            p1.statusLabel = `${p1.targetZone === 'Leg' ? '🥋 KICKING' : '🥊 PUNCHING'} Person #${p2.id}`;
-                            p1.strikingTargetId = p2.id;
-                            p1.threatScore = Math.max(0.95, p1.threatScore);
-
-                            if (p2.state !== 'AGGRESSOR' && p2.state !== 'ARMED') {
-                                p2.state = 'VICTIM';
-                                p2.statusLabel = `UNDER ATTACK by Person #${p1.id}`;
-                            }
-                        } else if (distCenters < avgScale * 2.4 && (p1.state === 'COMBAT_POSE' && p2.state === 'COMBAT_POSE')) {
-                            // Two people in close proximity in fighting guards = Mutual Altercation / Brawl!
-                            p1.state = 'AGGRESSOR';
-                            p2.state = 'AGGRESSOR';
-                            p1.statusLabel = `🥊 Brawling with Person #${p2.id}`;
-                            p2.statusLabel = `🥊 Brawling with Person #${p1.id}`;
-                            p1.threatScore = 0.95;
-                            p2.threatScore = 0.95;
-                            strikes.push({
-                                attackerId: p1.id,
-                                victimId: p2.id,
-                                attackerLimb: { x: p1.centerX, y: p1.centerY },
-                                victimTarget: { x: p2.centerX, y: p2.centerY },
-                                type: 'BRAWL',
-                                speed: 'Hostile Altercation',
-                                confidence: 0.95
-                            });
-                        }
-                    }
-                }
-            }
-
-            // 8. Threat Prioritization & Primary Alert String (Direct Weapon Detection + Solo/Multi Assault)
-            let primaryAlertMsg = null;
-            let maxConfidence = 0;
-
-            const armedPerson = personEntities.find(p => p.state === 'ARMED');
-            const aggressor = personEntities.find(p => p.state === 'AGGRESSOR');
-            const combatStance = personEntities.find(p => p.state === 'COMBAT_POSE');
-            const activeStrike = strikes.length > 0 ? strikes[0] : null;
-
-            if (detectedWeapons.length > 0) {
-                const topW = detectedWeapons[0];
-                const weaponName = (topW.displayClass || topW.class).toUpperCase();
-                const personId = armedPerson ? ` (Person #${armedPerson.id})` : '';
-                primaryAlertMsg = `ARMED THREAT: ${weaponName} DETECTED${personId}`;
-                maxConfidence = Math.max(topW.score, 0.94);
-            } else if (armedPerson && armedPerson.threatScore >= 0.15) {
-                primaryAlertMsg = `ARMED SUSPECT: Person #${armedPerson.id} holding ${armedPerson.armedWeapon.toUpperCase()}`;
-                maxConfidence = armedPerson.threatScore;
-            } else if (activeStrike) {
-                primaryAlertMsg = `PHYSICAL ASSAULT: Person #${activeStrike.attackerId} striking Person #${activeStrike.victimId} (${activeStrike.type})`;
-                maxConfidence = activeStrike.confidence;
-            } else if (aggressor) {
-                primaryAlertMsg = `PHYSICAL ASSAULT DETECTED: Person #${aggressor.id} ${aggressor.statusLabel.toUpperCase()}`;
-                maxConfidence = aggressor.threatScore;
-            } else if (combatStance) {
-                primaryAlertMsg = `COMBAT ALERT: Hostile Boxing / Fighting Guard Detected (Person #${combatStance.id})`;
-                maxConfidence = combatStance.threatScore;
-            }
-
-            // Crowd & Sound threshold breaches (if not overridden by a violent threat):
-           if (!primaryAlertMsg) {
-               if (isSustainedNoiseBreach) {
-                   primaryAlertMsg = `HIGH NOISE / AUDIO DISTRESS DETECTED (${currentSound} dB / Limit: ${soundThreshold} dB)`;
-                   maxConfidence = 0.93;
-               } else if (isOvercrowded) {
-                   primaryAlertMsg = `CROWD GATHERING LIMIT EXCEEDED (${currentGatheringCount}/${gatheringThreshold} People)`;
-                   maxConfidence = 0.95;
-               }
-           }
-
-           // Canvas Drawing: Body Frames, Skeletons, Keypoints, HUD Badges & Strike Vectors for EVERY Person
-           if (ctx) {
-               try {
-               const SKELETON_CONNECTIONS = [
-                   ['nose', 'left_eye'], ['nose', 'right_eye'], ['left_eye', 'left_ear'], ['right_eye', 'right_ear'],
-                   ['left_shoulder', 'right_shoulder'], ['left_shoulder', 'left_elbow'], ['right_shoulder', 'right_elbow'],
-                   ['left_elbow', 'left_wrist'], ['right_elbow', 'right_wrist'], ['left_shoulder', 'left_hip'],
-                   ['right_shoulder', 'right_hip'], ['left_hip', 'right_hip'], ['left_hip', 'left_knee'],
-                   ['right_hip', 'right_knee'], ['left_knee', 'left_ankle'], ['right_knee', 'right_ankle']
-               ];
-
-               // 1. Draw each person's tactical bounding box frame, skeleton, and HUD badge
-               personEntities.forEach(pe => {
-                   let themeColor = '#06b6d4'; // Cool Cyan (Normal)
-                   let glowColor = 'rgba(6, 182, 212, 0.4)';
-                   let badgeBg = 'rgba(15, 23, 42, 0.88)';
-                   let badgeBorder = '#06b6d4';
-                   let badgeIcon = '👤';
-
-                   if (pe.state === 'ARMED') {
-                       themeColor = '#dc2626';
-                       glowColor = 'rgba(220, 38, 38, 0.8)';
-                       badgeBg = 'rgba(153, 27, 27, 0.95)';
-                       badgeBorder = '#ef4444';
-                       badgeIcon = '⚠️';
-                   } else if (pe.state === 'AGGRESSOR') {
-                       themeColor = '#ef4444'; // Bright Red
-                       glowColor = 'rgba(239, 68, 68, 0.9)';
-                       badgeBg = 'rgba(185, 28, 28, 0.95)';
-                       badgeBorder = '#ff0000';
-                       badgeIcon = '🥊';
-                   } else if (pe.state === 'VICTIM') {
-                       themeColor = '#f97316'; // Vibrant Orange
-                       glowColor = 'rgba(249, 115, 22, 0.8)';
-                       badgeBg = 'rgba(194, 65, 12, 0.95)';
-                       badgeBorder = '#fb923c';
-                       badgeIcon = '⚠️';
-                   } else if (pe.state === 'COMBAT_POSE') {
-                       themeColor = '#f59e0b'; // Amber Guard
-                       glowColor = 'rgba(245, 158, 11, 0.7)';
-                       badgeBg = 'rgba(180, 83, 9, 0.92)';
-                       badgeBorder = '#f59e0b';
-                       badgeIcon = '🥊';
-                   }
-
-                   // A. Calculate Tactical Bounding Box Frame (Always guarantees a valid box for EVERY person)
-                   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-                   let validKpCount = 0;
-                   pe.keypoints.forEach(k => {
-                       if (k.score > 0.08) {
-                           validKpCount++;
-                           if (k.x < minX) minX = k.x;
-                           if (k.y < minY) minY = k.y;
-                           if (k.x > maxX) maxX = k.x;
-                           if (k.y > maxY) maxY = k.y;
-                       }
-                   });
-
-                   let boxX = 0, boxY = 0, boxW = 0, boxH = 0;
-
-                   if (validKpCount >= 2 && maxX > minX && maxY > minY) {
-                       const padX = Math.max(pe.shoulderWidth * 0.40, 28);
-                       const padYTop = Math.max(pe.shoulderWidth * 0.45, 32);
-                       const padYBottom = Math.max(pe.shoulderWidth * 0.45, 36);
-
-                       boxX = Math.max(4, minX - padX);
-                       boxY = Math.max(4, minY - padYTop);
-                       boxW = Math.min(canvas.width - boxX - 4, (maxX - minX) + padX * 2);
-                       boxH = Math.min(canvas.height - boxY - 4, (maxY - minY) + padYTop + padYBottom);
-                   } else if (pe.pose.box && typeof pe.pose.box.xMin === 'number') {
-                       let rawX = pe.pose.box.xMin;
-                       let rawY = pe.pose.box.yMin;
-                       let rawW = pe.pose.box.width;
-                       let rawH = pe.pose.box.height;
-                       if (rawW <= 1.5 && rawH <= 1.5) {
-                           rawX *= canvas.width;
-                           rawY *= canvas.height;
-                           rawW *= canvas.width;
-                           rawH *= canvas.height;
-                       }
-                       boxX = Math.max(4, rawX);
-                       boxY = Math.max(4, rawY);
-                       boxW = Math.min(canvas.width - boxX - 4, Math.max(70, rawW));
-                       boxH = Math.min(canvas.height - boxY - 4, Math.max(120, rawH));
-                   } else {
-                       const fallbackW = Math.max(pe.shoulderWidth * 2.4, 160);
-                       const fallbackH = Math.max(pe.shoulderWidth * 3.8, 250);
-                       boxX = Math.max(4, pe.centerX - fallbackW / 2);
-                       boxY = Math.max(4, pe.headY - 30);
-                       boxW = Math.min(canvas.width - boxX - 4, fallbackW);
-                       boxH = Math.min(canvas.height - boxY - 4, fallbackH);
-                   }
-                   ctx.save();
-                   ctx.strokeStyle = themeColor;
-                   ctx.lineWidth = (pe.state === 'AGGRESSOR' || pe.state === 'ARMED') ? 3 : 2;
-                   ctx.shadowColor = glowColor;
-                   ctx.shadowBlur = (pe.state === 'AGGRESSOR' || pe.state === 'ARMED') ? 14 : 6;
-
-                   // High-tech Tactical Corner Brackets
-                   const cLen = Math.max(12, Math.min(28, Math.floor(boxW * 0.22), Math.floor(boxH * 0.22)));
-
-                   // Top-Left
-                   ctx.beginPath();
-                   ctx.moveTo(boxX, boxY + cLen);
-                   ctx.lineTo(boxX, boxY);
-                   ctx.lineTo(boxX + cLen, boxY);
-                   ctx.stroke();
-
-                   // Top-Right
-                   ctx.beginPath();
-                   ctx.moveTo(boxX + boxW - cLen, boxY);
-                   ctx.lineTo(boxX + boxW, boxY);
-                   ctx.lineTo(boxX + boxW, boxY + cLen);
-                   ctx.stroke();
-
-                   // Bottom-Left
-                   ctx.beginPath();
-                   ctx.moveTo(boxX, boxY + boxH - cLen);
-                   ctx.lineTo(boxX, boxY + boxH);
-                   ctx.lineTo(boxX + cLen, boxY + boxH);
-                   ctx.stroke();
-
-                   // Bottom-Right
-                   ctx.beginPath();
-                   ctx.moveTo(boxX + boxW - cLen, boxY + boxH);
-                   ctx.lineTo(boxX + boxW, boxY + boxH);
-                   ctx.lineTo(boxX + boxW, boxY + boxH - cLen);
-                   ctx.stroke();
-
-                   // Subtle dashed boundary box
-                   ctx.setLineDash([4, 4]);
-                   ctx.strokeRect(boxX, boxY, boxW, boxH);
-                   ctx.setLineDash([]);
-
-                   // Subtle transparent body fill
-                   ctx.fillStyle = (pe.state === 'AGGRESSOR' || pe.state === 'ARMED') ? 'rgba(239, 68, 68, 0.12)' : 'rgba(6, 182, 212, 0.05)';
-                   ctx.fillRect(boxX, boxY, boxW, boxH);
-                   ctx.restore();
-
-                   // B. Skeleton Connections
-                   ctx.save();
-                   ctx.lineWidth = (pe.state === 'AGGRESSOR' || pe.state === 'ARMED' || pe.state === 'COMBAT_POSE') ? 4 : 2.5;
-                   ctx.strokeStyle = themeColor;
-                   ctx.shadowColor = glowColor;
-                   ctx.shadowBlur = (pe.state === 'AGGRESSOR' || pe.state === 'ARMED' || pe.state === 'COMBAT_POSE') ? 10 : 4;
-
-                   SKELETON_CONNECTIONS.forEach(([p1Name, p2Name]) => {
-                       const pt1 = pe.kpMap[p1Name];
-                       const pt2 = pe.kpMap[p2Name];
-                       if (pt1 && pt2 && pt1.score > 0.10 && pt2.score > 0.10) {
-                           ctx.beginPath();
-                           ctx.moveTo(pt1.x, pt1.y);
-                           ctx.lineTo(pt2.x, pt2.y);
-                           ctx.stroke();
-                       }
-                   });
-
-                   // C. Keypoints (Fists and Feet highlighted in red during strikes)
-                   pe.keypoints.forEach(k => {
-                       if (k.score > 0.10) {
-                           const isFist = (k.name === 'left_wrist' || k.name === 'right_wrist');
-                           const isFoot = (k.name === 'left_ankle' || k.name === 'right_ankle');
-                           ctx.beginPath();
-                           ctx.arc(k.x, k.y, ((isFist || isFoot) && pe.state === 'AGGRESSOR') ? 7 : 4.5, 0, 2 * Math.PI);
-                           ctx.fillStyle = (pe.state === 'AGGRESSOR' && (isFist || isFoot)) ? '#ff0000' : themeColor;
-                           ctx.fill();
-                           ctx.strokeStyle = '#ffffff';
-                           ctx.lineWidth = 1.5;
-                           ctx.stroke();
-                       }
-                   });
-                   ctx.restore();
-
-                   // D. HUD Nameplate above head / above box
-                   ctx.save();
-                   ctx.font = 'bold 12px sans-serif';
-                   const fullBadgeText = `${badgeIcon} Person #${pe.id} • ${pe.statusLabel}`;
-                   const textWidth = ctx.measureText(fullBadgeText).width;
-                   const badgeW = textWidth + 20;
-                   const badgeH = 26;
-                   const badgeX = Math.max(8, Math.min(boxX + (boxW - badgeW) / 2, canvas.width - badgeW - 8));
-                   const badgeY = Math.max(8, boxY - badgeH - 6);
-
-                   ctx.fillStyle = badgeBg;
-                   ctx.strokeStyle = badgeBorder;
-                   ctx.lineWidth = 1.5;
-                   ctx.beginPath();
-                   if (ctx.roundRect) {
-                       ctx.roundRect(badgeX, badgeY, badgeW, badgeH, 6);
-                   } else {
-                       ctx.rect(badgeX, badgeY, badgeW, badgeH);
-                   }
-                   ctx.fill();
-                   ctx.stroke();
-
-                   ctx.fillStyle = '#ffffff';
-                   ctx.fillText(fullBadgeText, badgeX + 9, badgeY + 16);
-                   ctx.restore();
-
-                   // E. Kinetic Velocity Speed Indicators
-                   const maxWristV = Math.max(pe.vLeftWrist, pe.vRightWrist);
-                   if (maxWristV >= 90) {
-                       const activeW = pe.vLeftWrist > pe.vRightWrist ? pe.leftWrist : pe.rightWrist;
-                       if (activeW && activeW.score > 0.10) {
-                           ctx.save();
-                           ctx.font = 'bold 11px monospace';
-                           const vTxt = `⚡ Fist: ${maxWristV} px/s`;
-                           const vW = ctx.measureText(vTxt).width + 10;
-                           ctx.fillStyle = 'rgba(239, 68, 68, 0.92)';
-                           ctx.fillRect(activeW.x + 8, activeW.y - 12, vW, 18);
-                           ctx.fillStyle = '#ffffff';
-                           ctx.fillText(vTxt, activeW.x + 12, activeW.y + 1);
-                           ctx.restore();
-                       }
-                   }
-
-                   const maxLegV = Math.max(pe.vLeftAnkle, pe.vRightAnkle, pe.vLeftKnee, pe.vRightKnee);
-                   if (maxLegV >= 90) {
-                       const activeLeg = (pe.vRightAnkle > pe.vLeftAnkle || pe.vRightKnee > pe.vLeftKnee) ? (pe.rightAnkle || pe.rightKnee) : (pe.leftAnkle || pe.leftKnee);
-                       if (activeLeg && activeLeg.score > 0.10) {
-                           ctx.save();
-                           ctx.font = 'bold 11px monospace';
-                           const legTxt = `⚡ Leg: ${maxLegV} px/s`;
-                           const legW = ctx.measureText(legTxt).width + 10;
-                           ctx.fillStyle = 'rgba(239, 68, 68, 0.92)';
-                           ctx.fillRect(activeLeg.x + 8, activeLeg.y - 12, legW, 18);
-                           ctx.fillStyle = '#ffffff';
-                           ctx.fillText(legTxt, activeLeg.x + 12, activeLeg.y + 1);
-                           ctx.restore();
-                       }
-                   }
-
-                   // Solo Strike Highlight Reticle
-                   if (pe.state === 'AGGRESSOR' && personEntities.length === 1 && pe.strikingLimb) {
-                       ctx.save();
-                       ctx.beginPath();
-                       ctx.arc(pe.strikingLimb.x, pe.strikingLimb.y, 22, 0, 2 * Math.PI);
-                       ctx.strokeStyle = '#ef4444';
-                       ctx.lineWidth = 3;
-                       ctx.setLineDash([4, 4]);
-                       ctx.stroke();
-                       ctx.fillStyle = 'rgba(239, 68, 68, 0.3)';
-                       ctx.fill();
-                       ctx.restore();
-                   }
-               });
-
-               // 2. Draw Strike Action Vectors between Attacker and Victim (Multi-person combat)
-               strikes.forEach(s => {
-                   const limb = s.attackerLimb || s.attackerWrist;
-                   if (limb && s.victimTarget) {
-                       ctx.save();
-                       ctx.setLineDash([6, 4]);
-                       ctx.strokeStyle = '#ef4444';
-                       ctx.lineWidth = 3.5;
-                       ctx.shadowColor = '#ff0000';
-                       ctx.shadowBlur = 12;
-
-                       ctx.beginPath();
-                       ctx.moveTo(limb.x, limb.y);
-                       ctx.lineTo(s.victimTarget.x, s.victimTarget.y);
-                       ctx.stroke();
-
-                       // Impact circle on victim
-                       ctx.beginPath();
-                       ctx.arc(s.victimTarget.x, s.victimTarget.y, 16, 0, 2 * Math.PI);
-                       ctx.fillStyle = 'rgba(239, 68, 68, 0.45)';
-                       ctx.fill();
-                       ctx.strokeStyle = '#ff0000';
-                       ctx.lineWidth = 2.5;
-                       ctx.stroke();
-
-                       // Midpoint strike badge
-                       const midX = (limb.x + s.victimTarget.x) / 2;
-                       const midY = (limb.y + s.victimTarget.y) / 2;
-
-                       ctx.setLineDash([]);
-                       ctx.fillStyle = 'rgba(0, 0, 0, 0.92)';
-                       ctx.strokeStyle = '#ef4444';
-                       ctx.lineWidth = 1.5;
-                       const strikeLabel = `💥 ${s.type} STRIKE (${Math.round(s.confidence * 100)}%) • ${s.speed}`;
-                       ctx.font = 'bold 11px sans-serif';
-                       const strkW = ctx.measureText(strikeLabel).width + 14;
-
-                       ctx.beginPath();
-                       if (ctx.roundRect) ctx.roundRect(midX - strkW / 2, midY - 12, strkW, 24, 4);
-                       else ctx.rect(midX - strkW / 2, midY - 12, strkW, 24);
-                       ctx.fill();
-                       ctx.stroke();
-
-                       ctx.fillStyle = '#ff4444';
-                       ctx.fillText(strikeLabel, midX - strkW / 2 + 7, midY + 4);
-                       ctx.restore();
-                   }
-               });
-
-               // 3. Top Active Incident Banner on Canvas
-               if (primaryAlertMsg) {
-                   ctx.save();
-                   const bannerText = `🚨 THREAT DETECTED: ${primaryAlertMsg.toUpperCase()}`;
-                   ctx.font = 'bold 13px sans-serif';
-                   const bW = ctx.measureText(bannerText).width + 24;
-                   const bH = 28;
-                   const bX = (canvas.width - bW) / 2;
-                   const bY = 12;
-
-                   ctx.fillStyle = 'rgba(185, 28, 28, 0.94)';
-                   ctx.strokeStyle = '#ef4444';
-                   ctx.lineWidth = 2;
-                   ctx.shadowColor = '#ff0000';
-                   ctx.shadowBlur = 12;
-
-                   ctx.beginPath();
-                   if (ctx.roundRect) ctx.roundRect(bX, bY, bW, bH, 6);
-                   else ctx.rect(bX, bY, bW, bH);
-                   ctx.fill();
-                   ctx.stroke();
-
-                   ctx.fillStyle = '#ffffff';
-                   ctx.fillText(bannerText, bX + 12, bY + 19);
-                   ctx.restore();
-               } else {
-                   // Tactical Scanning Matrix indicator
-                   ctx.save();
-                   const scanText = `🟢 AI THREAT ENGINE: ACTIVE • ${personEntities.length} PERSON(S) TRACKED`;
-                   ctx.font = 'bold 11px monospace';
-                   const sW = ctx.measureText(scanText).width + 16;
-                   ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
-                   ctx.strokeStyle = '#06b6d4';
-                   ctx.lineWidth = 1;
-                   ctx.beginPath();
-                   if (ctx.roundRect) ctx.roundRect(10, 10, sW, 22, 4);
-                   else ctx.rect(10, 10, sW, 22);
-                   ctx.fill();
-                   ctx.stroke();
-                   ctx.fillStyle = '#38bdf8';
-                   ctx.fillText(scanText, 18, 25);
-                   ctx.restore();
-               }
-
-               // 4. Live Gathering Count & Noise Level HUD on Canvas
-               ctx.save();
-               ctx.font = 'bold 11px sans-serif';
-               const gHudText = `👥 GATHERING: ${currentGatheringCount}/${gatheringThreshold}`;
-               const gHudW = ctx.measureText(gHudText).width + 16;
-               const hudH = 22;
-               const hudX = canvas.width - gHudW - 10;
-               const gHudY = 10;
-
-               ctx.fillStyle = isOvercrowded ? 'rgba(185, 28, 28, 0.9)' : 'rgba(15, 23, 42, 0.88)';
-               ctx.strokeStyle = isOvercrowded ? '#ef4444' : 'rgba(56, 189, 248, 0.4)';
-               ctx.lineWidth = 1.2;
-               ctx.beginPath();
-               if (ctx.roundRect) ctx.roundRect(hudX, gHudY, gHudW, hudH, 4);
-               else ctx.rect(hudX, gHudY, gHudW, hudH);
-               ctx.fill();
-               ctx.stroke();
-               ctx.fillStyle = '#ffffff';
-               ctx.fillText(gHudText, hudX + 8, gHudY + 15);
-
-               const soundHudText = `🔊 NOISE: ${currentSound} dB`;
-               const sHudW = ctx.measureText(soundHudText).width + 16;
-               const sHudX = canvas.width - sHudW - 10;
-               const sHudY = gHudY + hudH + 6;
-
-               ctx.fillStyle = isNoiseOverLimit ? 'rgba(194, 65, 12, 0.9)' : 'rgba(15, 23, 42, 0.88)';
-               ctx.strokeStyle = isNoiseOverLimit ? '#ea580c' : 'rgba(234, 179, 8, 0.4)';
-               ctx.lineWidth = 1.2;
-               ctx.beginPath();
-               if (ctx.roundRect) ctx.roundRect(sHudX, sHudY, sHudW, hudH, 4);
-               else ctx.rect(sHudX, sHudY, sHudW, hudH);
-               ctx.fill();
-               ctx.stroke();
-               ctx.fillStyle = '#ffffff';
-               ctx.fillText(soundHudText, sHudX + 8, sHudY + 15);
-               ctx.restore();
-               } catch (drawErr) {
-                   console.error('Tactical Canvas Render Error:', drawErr);
-               }
-           }
-
-
-
-           // Trigger real alert to police dashboard & play sound (executed AFTER canvas rendering so screenshot has all labels, bodies, and skeletons!)
-           const isViolentThreat = aggressor || armedPerson || activeStrike || combatStance;
-           if (primaryAlertMsg) {
-               window.activeThreatStreak = (window.activeThreatStreak || 0) + 1;
-               if (isViolentThreat || window.activeThreatStreak >= 2) {
-                   triggerRealAlert(primaryAlertMsg, maxConfidence);
-               }
-           } else {
-               window.activeThreatStreak = 0;
-           }
+    try {
+      setIsProcessing(true);
+      isProcessingRef.current = true;
+
+      const engine = getEngine();
+      await engine.init((message) => console.info('[AI]', message));
+
+      const video = laptopVideoRef.current;
+      const canvas = canvasRef.current;
+      if (!video || !canvas) {
+        setIsProcessing(false);
+        isProcessingRef.current = false;
+        alert('Camera feed is not ready yet. Restore the operator webcam and try again.');
+        return;
+      }
+
+      if (video.paused) {
+        try {
+          await video.play();
+        } catch {
+          // Autoplay can be blocked until the user interacts with the page.
         }
-     }, 125); // Scan at 125ms (~8 FPS) for ultra-responsive strike & combat detection
-     } catch (e) {
-         console.error("AI Initialization Error:", e);
-         setIsProcessing(false);
-     }
+      }
+
+      const cam = activeCamera();
+      engine.setLimits({
+        gatheringLimit: Number(cam?.gathering_threshold) || 5,
+        soundLimit: Number(cam?.sound_threshold) || 75,
+      });
+      engine.start(video, canvas);
+    } catch (error) {
+      console.error('AI Initialization Error:', error);
+      setIsProcessing(false);
+      isProcessingRef.current = false;
+    }
   };
+
+  // Keep the running engine in sync when an operator edits the limits.
+  useEffect(() => {
+    if (!engineRef.current) return;
+    const cam = activeCamera();
+    engineRef.current.setLimits({
+      gatheringLimit: Number(cam?.gathering_threshold) || 5,
+      soundLimit: Number(cam?.sound_threshold) || 75,
+    });
+  }, [cameras]);
+
+  // Never leave the camera or the render loop running after unmount.
+  useEffect(
+    () => () => {
+      if (engineRef.current) engineRef.current.stop();
+    },
+    [],
+  );
 
   const stopVideoProcessing = () => {
     isProcessingRef.current = false;
-    if (aiIntervalRef.current) clearInterval(aiIntervalRef.current);
-    poseHistoryRef.current = [];
+    if (engineRef.current) engineRef.current.stop();
     const canvas = canvasRef.current;
     if (canvas) {
       const ctx = canvas.getContext('2d');
@@ -2375,9 +1210,23 @@ export default function PoliceDashboard() {
               <h3 style={{ marginTop: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <AlertTriangle size={20} color="var(--accent)" /> AI Threat Analysis Engine
               </h3>
-              <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '16px' }}>
-                Bind the local AI Microservice to these active video streams. The AI will scan frames for weapons/anomalies in the background.
+              <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '12px' }}>
+                Runs entirely in this browser (COCO-SSD + MoveNet). Every person gets a tracked frame; weapons
+                and strikes must be confirmed over several frames before an alert is raised.
               </p>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px', fontSize: '0.78rem', flexWrap: 'wrap' }}>
+                <span style={{
+                  padding: '2px 8px', borderRadius: '4px', fontWeight: 700, letterSpacing: '0.04em',
+                  background: engineStatus === 'running' ? 'rgba(16, 185, 129, 0.15)' : 'rgba(148, 163, 184, 0.12)',
+                  color: engineStatus === 'running' ? 'var(--success)' : 'var(--text-secondary)',
+                  border: `1px solid ${engineStatus === 'running' ? 'rgba(16, 185, 129, 0.4)' : 'rgba(148, 163, 184, 0.25)'}`
+                }}>
+                  ENGINE: {engineStatus.toUpperCase()}
+                </span>
+                <span style={{ color: 'var(--text-secondary)' }}>
+                  Crowd &amp; noise limits are read live from the active camera.
+                </span>
+              </div>
               <div style={{ display: 'flex', gap: '8px' }}>
                   <button 
                     className="btn-primary" 
