@@ -4,7 +4,8 @@ YOLO Crime & Behavior Detection Engine
 Inspired by Attention-based YOLO and Multi-Object Tracking (ByteTrack).
 Detects:
  - Persistent Track IDs per person across frames (ByteTrack)
- - Armed Suspects & Weapon Proximity (Knife, Gun, Bat, Scissors, etc.)
+ - Armed Suspects & Weapon Proximity (knife, bat, scissors via COCO; firearms and
+   other weapons only through a custom model passed in as `weapon_detections`)
  - Violent Altercations & Kinetic Strikes (Lunging, Physical Assault)
  - Mutual Brawls (Hostile convergence of multiple subjects)
  - Fallen Person / Collapse (Medical / Assault Distress)
@@ -90,7 +91,7 @@ class YOLOCrimeEngine:
         history.append(record)
         return record
 
-    def analyze_frame(self, frame, gathering_threshold=5):
+    def analyze_frame(self, frame, gathering_threshold=5, weapon_detections=None):
         """
         Runs YOLO + ByteTrack on a single frame, extracts behaviors, weapons,
         strikes, crowds, and returns the tactical annotated frame + alerts.
@@ -167,6 +168,26 @@ class YOLOCrimeEngine:
                             'bbox': [x1, y1, x2, y2],
                             'center': (cx, cy)
                         })
+
+        # 1b. Merge detections from a purpose-trained weapon model.
+        # COCO has no firearm class, so a custom model (see weapon_detector.py)
+        # is the only way to detect guns. These detections join the normal
+        # pipeline: proximity binding, HUD rendering and alert dispatch.
+        if weapon_detections:
+            for det in weapon_detections:
+                bbox = det.get('bbox')
+                if not bbox or len(bbox) != 4:
+                    continue
+                center = det.get('center')
+                if not center:
+                    center = ((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0)
+                detected_weapons.append({
+                    'name': det.get('name', 'weapon'),
+                    'conf': float(det.get('conf', det.get('score', 0.0))),
+                    'bbox': list(bbox),
+                    'center': (float(center[0]), float(center[1])),
+                    'source': 'weapon_model',
+                })
 
         # 2. Weapon Proximity Binding (Associate detected weapons with closest person)
         for weapon in detected_weapons:

@@ -18,6 +18,7 @@ import requests
 import sys
 import os
 from yolo_crime_engine import YOLOCrimeEngine
+from weapon_detector import WeaponDetector
 
 # Default backend URL
 DEFAULT_BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:5000")
@@ -30,13 +31,24 @@ def parse_args():
     parser.add_argument("--backend", type=str, default=DEFAULT_BACKEND_URL, help="Backend API base URL")
     parser.add_argument("--model", type=str, default="yolov8n.pt", help="YOLO model weights (e.g. 'yolov8n.pt', 'yolo11n.pt')")
     parser.add_argument("--gathering-limit", type=int, default=5, help="Crowd gathering limit threshold")
+    parser.add_argument("--weapon-model", type=str, default=os.environ.get("WEAPON_MODEL_PATH", ""),
+                        help="Path to a custom weapon YOLO model. Required for firearm detection — "
+                             "COCO weights have no gun class. Train one with train_weapon_model.py")
+    parser.add_argument("--weapon-conf", type=float, default=0.35, help="Confidence threshold for the weapon model")
+    parser.add_argument("--device", type=str, default="", help="Inference device: '0' for first GPU, 'cpu', or '' for auto")
+    parser.add_argument("--token", type=str, default=os.environ.get("SCT_TOKEN", ""),
+                        help="JWT for authenticated backend endpoints (needed to sync camera thresholds)")
     parser.add_argument("--no-gui", action="store_true", help="Disable OpenCV preview window (headless mode)")
     return parser.parse_args()
 
-def fetch_camera_config(backend_url, camera_id):
-    """Attempts to fetch real-time camera metadata (gathering threshold, sound limit) from backend."""
+def fetch_camera_config(backend_url, camera_id, token=""):
+    """Attempts to fetch real-time camera metadata (gathering threshold, sound limit) from backend.
+
+    /api/cameras is JWT-protected, so this only succeeds when a token is supplied.
+    """
     try:
-        res = requests.get(f"{backend_url}/api/cameras", timeout=3)
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        res = requests.get(f"{backend_url}/api/cameras", timeout=3, headers=headers)
         if res.status_code == 200:
             cams = res.json()
             for c in cams:
@@ -88,7 +100,17 @@ def main():
     video_source = int(args.source) if args.source.isdigit() else args.source
 
     # Initialize YOLO Crime Engine (conf_threshold 0.20 for sensitive weapon/knife detection)
-    engine = YOLOCrimeEngine(model_path=args.model, conf_threshold=0.20, tracker="bytetrack.yaml")
+    engine = YOLOCrimeEngine(model_path=args.model, conf_threshold=0.20, tracker="bytetrack.yaml", device=args.device)
+
+    # Optional purpose-trained weapon model — the only way to detect firearms.
+    weapon_detector = WeaponDetector(
+        model_path=args.weapon_model or None,
+        conf_threshold=args.weapon_conf,
+        device=args.device,
+    )
+    print(f" Weapon Model  : {weapon_detector.status()}")
+    if not args.token:
+        print("[CONFIG] No --token supplied: camera thresholds stay at the CLI defaults (backend sync needs a JWT).")
 
     # Open video feed
     cap = cv2.VideoCapture(video_source)
@@ -121,12 +143,17 @@ def main():
             now = time.time()
             if now - last_config_check > 10:
                 last_config_check = now
-                cam_cfg = fetch_camera_config(args.backend, args.camera_id)
+                cam_cfg = fetch_camera_config(args.backend, args.camera_id, args.token)
                 if cam_cfg and 'gathering_threshold' in cam_cfg:
                     gathering_threshold = int(cam_cfg['gathering_threshold'])
 
-            # Run YOLO + ByteTrack behavioral analysis
-            results = engine.analyze_frame(frame, gathering_threshold=gathering_threshold)
+            # Run YOLO + ByteTrack behavioral analysis, merging custom weapon detections
+            weapon_dets = weapon_detector.detect(frame) if weapon_detector.available else []
+            results = engine.analyze_frame(
+                frame,
+                gathering_threshold=gathering_threshold,
+                weapon_detections=weapon_dets,
+            )
             annotated_frame = results['annotated_frame']
             alerts = results['alerts']
 

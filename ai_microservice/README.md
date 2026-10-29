@@ -9,7 +9,8 @@ This microservice provides high-accuracy, real-time Computer Vision surveillance
 1. **Multi-Object Tracking (MOT)**:
    - Assigns a permanent, unique `Track ID` (`id:1`, `id:343`, etc.) to every detected person across all frames.
 2. **Lethal Weapon & Armed Suspect Detection**:
-   - Detects weapons (knives, guns/pistols, baseball bats, bladed items) and binds them spatially to the nearest individual, flagging them as `ARMED SUSPECT`.
+   - COCO classes (knife, scissors, bat, bottle) are detected out of the box and bound spatially to the nearest person, flagged as `ARMED SUSPECT`.
+   - **Firearms require a purpose-trained model** — COCO has no gun class. Drop weights into `models/weapon_best.pt` (or pass `--weapon-model`) and firearms are detected with the same binding + alert pipeline. See [WEAPONS.md](WEAPONS.md).
 3. **Physical Assault & Strike Detection**:
    - Computes kinetic velocity ($\Delta \text{pos} / \Delta t$) per track ID to detect lunges, high-speed strikes, and mutual brawls.
 4. **Fallen / Distressed Person Detection**:
@@ -45,3 +46,27 @@ ai_microservice\venv\Scripts\python.exe ai_microservice\stream_worker.py --sourc
 ```bash
 ai_microservice\venv\Scripts\python.exe ai_microservice\stream_worker.py --source 0 --no-gui
 ```
+
+### 5. Enable Firearm / Weapon Detection (custom model)
+COCO weights cannot detect guns. Train a weapon model first, then point the node at it:
+
+```bash
+# 1. train (see WEAPONS.md for datasets)
+python train_weapon_model.py --data datasets/weapons/data.yaml --epochs 100
+
+# 2. run with the model
+ai_microservice\venv\Scripts\python.exe ai_microservice\stream_worker.py ^
+  --source 0 --weapon-model ai_microservice\models\weapon_best.pt --weapon-conf 0.35
+```
+
+Without the weights file the node still runs normally — firearm detection is simply reported as `disabled`.
+
+### Useful flags
+
+| Flag | Purpose |
+|---|---|
+| `--weapon-model` | Path to a custom weapon YOLO model |
+| `--weapon-conf` | Weapon confidence threshold (default 0.35) |
+| `--device` | `0` for GPU, `cpu`, or empty for auto |
+| `--token` | JWT so per-camera thresholds sync from the backend |
+| `--gathering-limit` | Fallback crowd limit when no token is supplied |
