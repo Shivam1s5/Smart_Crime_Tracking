@@ -68,6 +68,12 @@ export default function AdminDashboard() {
       setCameras((prev) => prev.map(c => c.camera_id === updatedCam.camera_id ? updatedCam : c));
     });
 
+    // Evidence images arrive after the alert (async upload) — patch them in.
+    socket.on('alert_updated', (patch) => {
+      if (!patch || !patch._id) return;
+      setAlerts((prev) => prev.map((a) => (a._id === patch._id ? { ...a, ...patch } : a)));
+    });
+
 
 
     return () => socket.disconnect();

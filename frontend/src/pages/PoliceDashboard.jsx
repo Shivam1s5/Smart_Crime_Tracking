@@ -161,7 +161,6 @@ export default function PoliceDashboard() {
   const canvasRef = useRef(null);
 
   const socketRef = useRef(null);
-  const lastAlertTimesRef = useRef({});
 
   useEffect(() => {
     // Warm the shared models up once so the first "Start AI Monitoring" click is fast.
@@ -214,6 +213,13 @@ export default function PoliceDashboard() {
 
     socket.on('camera_updated', (updatedCam) => {
       setCameras((prev) => prev.map(c => c.camera_id === updatedCam.camera_id ? updatedCam : c));
+    });
+
+    // Evidence images are uploaded after the alert is broadcast (so the alert
+    // is not delayed by a 1-3s Cloudinary upload). Patch the image in later.
+    socket.on('alert_updated', (patch) => {
+      if (!patch || !patch._id) return;
+      setAlerts((prev) => prev.map((a) => (a._id === patch._id ? { ...a, ...patch } : a)));
     });
 
 
@@ -329,6 +335,11 @@ export default function PoliceDashboard() {
     e.preventDefault();
     if (!useLaptopCamera && !newCameraData.stream_url) {
       alert("Please enter a stream URL or select Laptop Camera.");
+      return;
+    }
+
+    if (useLaptopCamera && (camerasRef.current || []).some((c) => c.stream_url === 'LOCAL_WEBCAM')) {
+      alert("A laptop webcam is already linked. Remove the existing one first — only one physical webcam can be streamed to this dashboard.");
       return;
     }
     
@@ -458,20 +469,15 @@ export default function PoliceDashboard() {
     const typeUpper = (type || '').toUpperCase();
 
     let category = 'GENERAL';
-    let cooldownMs = 25000;
 
     if (typeUpper.includes('GATHERING') || typeUpper.includes('CROWD')) {
       category = 'CROWD';
-      cooldownMs = 50000; // 50s cooldown for crowd limit notifications
     } else if (typeUpper.includes('NOISE') || typeUpper.includes('AUDIO')) {
       category = 'NOISE';
-      cooldownMs = 40000; // 40s cooldown for noise notifications
     } else if (typeUpper.includes('WEAPON') || typeUpper.includes('GUN') || typeUpper.includes('KNIFE') || typeUpper.includes('ARMED') || typeUpper.includes('FIREARM')) {
       category = 'WEAPON';
-      cooldownMs = 18000; // 18s cooldown
     } else if (typeUpper.includes('ASSAULT') || typeUpper.includes('PUNCH') || typeUpper.includes('COMBAT') || typeUpper.includes('STRIKE') || typeUpper.includes('BRAWL')) {
       category = 'COMBAT';
-      cooldownMs = 10000; // 10s cooldown for physical combat strikes
     }
 
     // Play instant acoustic alert siren/beep via Web Audio API so user immediately hears audio confirmation
@@ -493,13 +499,8 @@ export default function PoliceDashboard() {
       }
     } catch (soundErr) {}
 
-    const lastTime = (lastAlertTimesRef.current && lastAlertTimesRef.current[category]) || 0;
-    if (now - lastTime < cooldownMs) {
-      return; // Suppressed by active category cooldown
-    }
-
-    if (!lastAlertTimesRef.current) lastAlertTimesRef.current = {};
-    lastAlertTimesRef.current[category] = now;
+    // The engine already applies an evidence-based per-category cooldown, so the
+    // old second timer here (10-50s) only delayed genuine alerts. Fire now.
     window.lastAlertTime = now;
     
     const cam = (camerasRef.current || []).find(c => c.stream_url === 'LOCAL_WEBCAM') || (camerasRef.current || [])[0];
@@ -1043,6 +1044,15 @@ export default function PoliceDashboard() {
               ) : (
                 cameras.map((cam) => {
                   const cardWidth = cameraSizePreset === 'compact' ? '380px' : cameraSizePreset === 'standard' ? '480px' : '620px';
+                  // Only the first laptop-webcam entry may own the shared
+                  // video/canvas refs. Two LOCAL_WEBCAM cards used to fight over
+                  // the same refs, so the engine drew into the second card's
+                  // canvas while the operator watched the first — the overlay
+                  // looked absent on the live feed while alert snapshots (taken
+                  // from the engine's canvas) showed it correctly.
+                  const isLocalCam = cam.stream_url === 'LOCAL_WEBCAM';
+                  const primaryLocalId = (cameras.find((c) => c.stream_url === 'LOCAL_WEBCAM') || {})._id;
+                  const isPrimaryLocal = isLocalCam && cam._id === primaryLocalId;
                   return (
                     <div 
                       key={cam._id} 
@@ -1125,11 +1135,18 @@ export default function PoliceDashboard() {
                       
                       {cam.stream_url ? (
                         cam.stream_url === 'LOCAL_WEBCAM' ? (
-                          <>
-                            <LocalWebcam ref={laptopVideoRef} onAudioLevel={handleAudioLevel} />
-                            <canvas ref={canvasRef} style={{ width: '100%', height: '100%', objectFit: 'cover', position: 'absolute', top: 0, left: 0, zIndex: 3, pointerEvents: 'none' }} />
-                          </>
-
+                          isPrimaryLocal ? (
+                            <>
+                              <LocalWebcam ref={laptopVideoRef} onAudioLevel={handleAudioLevel} />
+                              <canvas ref={canvasRef} style={{ width: '100%', height: '100%', objectFit: 'cover', position: 'absolute', top: 0, left: 0, zIndex: 3, pointerEvents: 'none' }} />
+                            </>
+                          ) : (
+                            <div style={{ position: 'relative', zIndex: 2, width: '100%', height: '100%', background: '#000', color: 'var(--text-secondary)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '16px', fontSize: '0.8rem' }}>
+                              <Camera size={22} style={{ marginBottom: '8px', opacity: 0.5 }} />
+                              Duplicate laptop webcam
+                              <span style={{ fontSize: '0.72rem', opacity: 0.7, marginTop: '4px' }}>Only one can stream. Remove this entry.</span>
+                            </div>
+                          )
                         ) : cam.stream_url.includes('youtube.com') ? (
                           <iframe src={cam.stream_url} frameBorder="0" allow="autoplay; encrypted-media" style={{ width: '100%', height: '100%', position: 'relative', zIndex: 2 }}></iframe>
                         ) : (

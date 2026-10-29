@@ -9,6 +9,7 @@
 
 const COLORS = {
   NORMAL: '#22d3ee',
+  MOTION: '#94a3b8',
   GUARD: '#f59e0b',
   STRIKING: '#ef4444',
   VICTIM: '#fb923c',

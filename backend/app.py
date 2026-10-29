@@ -9,6 +9,7 @@ import os
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 import time
+import threading
 from bson.objectid import ObjectId
 import cloudinary
 import cloudinary.uploader
@@ -345,6 +346,29 @@ def delete_alert(alert_id):
 # Server-side cooldown cache: (camera_id, alert_category) -> timestamp
 alert_cooldowns = {}
 
+
+def _store_evidence_async(alert_id, image_base64):
+    """Uploads an evidence frame in the background and patches the alert row.
+
+    Runs off the request thread so a slow Cloudinary round trip never delays the
+    alert itself. The dashboard receives the image via `alert_updated`.
+    """
+    try:
+        upload_result = cloudinary.uploader.upload(
+            image_base64,
+            folder="smart_crime_tracking_alerts",
+        )
+        url = upload_result.get('secure_url')
+        public_id = upload_result.get('public_id')
+
+        alerts_collection.update_one(
+            {'_id': alert_id},
+            {'$set': {'image_url': url, 'public_id': public_id}},
+        )
+        socketio.emit('alert_updated', {'_id': str(alert_id), 'image_url': url})
+    except Exception as exc:
+        print(f"Cloudinary Upload Error: {exc}")
+
 @app.route('/api/alerts/trigger', methods=['POST'])
 def trigger_alert():
     # This endpoint is called by the AI Microservice (or frontend now)
@@ -356,22 +380,28 @@ def trigger_alert():
     camera_id = data.get('camera_id')
     alert_type = (data.get('type') or 'SUSPICIOUS ACTIVITY').upper()
 
-    # Categorize threat & determine cooldown window to prevent duplicate spamming
+    # Categorize threat & determine cooldown window to prevent duplicate spamming.
+    # These run AFTER the client-side engine has already confirmed the event over
+    # several frames, so they only need to stop immediate repeats — long windows
+    # here were what made legitimate repeat alerts feel late.
     if 'GATHERING' in alert_type or 'CROWD' in alert_type:
         category = 'CROWD'
-        cooldown_sec = 45.0
+        cooldown_sec = 30.0
     elif 'NOISE' in alert_type or 'AUDIO' in alert_type:
         category = 'NOISE'
-        cooldown_sec = 40.0
+        cooldown_sec = 30.0
     elif 'WEAPON' in alert_type or 'GUN' in alert_type or 'KNIFE' in alert_type:
         category = 'WEAPON'
-        cooldown_sec = 18.0
-    elif 'ASSAULT' in alert_type or 'PUNCH' in alert_type or 'COMBAT' in alert_type or 'BRAWL' in alert_type:
-        category = 'COMBAT'
         cooldown_sec = 12.0
+    elif 'ASSAULT' in alert_type or 'PUNCH' in alert_type or 'COMBAT' in alert_type or 'BRAWL' in alert_type or 'STRIKE' in alert_type:
+        category = 'COMBAT'
+        cooldown_sec = 8.0
+    elif 'DOWN' in alert_type or 'FALL' in alert_type or 'MEDICAL' in alert_type:
+        category = 'MEDICAL'
+        cooldown_sec = 20.0
     else:
         category = 'GENERAL'
-        cooldown_sec = 20.0
+        cooldown_sec = 10.0
 
     now = time.time()
     cache_key = (camera_id, category)
@@ -388,35 +418,37 @@ def trigger_alert():
     
     image_base64 = data.get('image_base64')
     image_url = data.get('image_url', '')
-    
-    public_id = None
-    if image_base64:
-        try:
-            upload_result = cloudinary.uploader.upload(image_base64, folder="smart_crime_tracking_alerts")
-            image_url = upload_result.get("secure_url")
-            public_id = upload_result.get("public_id")
-        except Exception as e:
-            print(f"Cloudinary Upload Error: {e}")
-            
+
     new_alert = {
-        'camera_id': data.get('camera_id'),
+        'camera_id': camera_id,
         'area': data.get('area', 'Unknown'),
-        'type': data.get('type', 'Weapon Detected'),
+        'type': data.get('type', 'Suspicious activity'),
         'confidence': data.get('confidence', 0.0),
         'image_url': image_url,
-        'public_id': public_id,
+        'public_id': None,
         'timestamp': datetime.utcnow()
     }
-    
-    # Save to db
-    alerts_collection.insert_one(new_alert)
-    new_alert['_id'] = str(new_alert['_id'])
-    new_alert['timestamp'] = new_alert['timestamp'].isoformat()
-    
-    # Broadcast to police dashboards via WebSocket
-    socketio.emit('red_alert', new_alert)
-    
-    return jsonify({'message': 'Alert triggered successfully', 'alert': new_alert}), 201
+
+    # Persist first, then broadcast immediately. The evidence upload can take
+    # 1-3s on Cloudinary; doing it inline delayed the red alert and the
+    # dashboard entry, which is exactly what operators reported as "late".
+    insert_result = alerts_collection.insert_one(new_alert)
+    alert_id = insert_result.inserted_id
+
+    payload = dict(new_alert)
+    payload['_id'] = str(alert_id)
+    payload['timestamp'] = new_alert['timestamp'].isoformat()
+
+    socketio.emit('red_alert', payload)
+
+    if image_base64:
+        threading.Thread(
+            target=_store_evidence_async,
+            args=(alert_id, str(image_base64)),
+            daemon=True,
+        ).start()
+
+    return jsonify({'message': 'Alert triggered successfully', 'alert': payload}), 201
 
 @app.route('/api/video/start', methods=['POST'])
 @jwt_required()

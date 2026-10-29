@@ -50,14 +50,15 @@ export const DEFAULTS = {
   maxWeaponAreaRatio: 0.18,
   weaponBindTorsoRatio: 1.8,
 
-  // Motion analysis
-  strikeSpeed: 1.6,
-  brawlSpeed: 1.1,
+  // Motion analysis. Thresholds are in torso-lengths/second and deliberately
+  // require another person in contact range before an alert fires.
+  strikeSpeed: 2.2,
+  brawlSpeed: 1.6,
   contactRatio: 1.15,
   smoothAlpha: 0.5,
 
   // Hysteresis
-  confirmFrames: { STRIKING: 2, GUARD: 3, ASSAULT: 2, BRAWL: 2, FALLEN: 3 },
+  confirmFrames: { STRIKING: 3, GUARD: 4, ASSAULT: 3, BRAWL: 3, FALLEN: 8 },
   stateHoldMs: 1200,
 
   // Alert suppression windows (ms)
@@ -760,16 +761,17 @@ export class ThreatEngine {
       const fast = motion.speed >= cfg.strikeSpeed;
 
       if (fast && extended && raised) {
-        const confidence = clamp(0.55 + (motion.speed - cfg.strikeSpeed) * 0.05, 0.55, 0.9);
-        if (this._confirm(track, 'STRIKING', `Strike motion (${motion.speed.toFixed(1)} torso/s)`, confidence, now)) {
-          events.push({
-            category: 'ASSAULT',
-            type: 'VIOLENT STRIKE DETECTED',
-            confidence,
-            trackId: track.id,
-            detail: `Subject #${track.id} throwing a strike`,
-          });
-        }
+        // Visual-only "motion" state. A single person moving fast is NOT
+        // evidence of an assault — people dance, stretch, wave and gesture.
+        // Alerts require a second person inside contact range, so this state
+        // never raises one and never paints a threat banner.
+        this._confirm(
+          track,
+          'MOTION',
+          `Fast arm motion (${motion.speed.toFixed(1)} torso/s)`,
+          clamp(0.4 + motion.speed * 0.05, 0.4, 0.65),
+          now,
+        );
       }
     }
 
@@ -792,15 +794,25 @@ export class ThreatEngine {
     }
 
     // --- Fallen / collapsed person. ---------------------------------------
+    // Sitting, leaning and close-up webcam framing all produce a wide box, so
+    // an aspect-ratio test alone produced constant "PERSON DOWN" alerts. A real
+    // fall also makes the body horizontal: head and hips end up at the same
+    // height, which the torso vector measures directly.
     for (const track of tracks) {
+      const motion = track.motion;
+      if (!motion || motion.stale) continue;
+
       const aspect = boxWidth(track.bbox) / Math.max(1, boxHeight(track.bbox));
-      const low = boxCenter(track.bbox).y > this.canvas.height * 0.55;
-      if (aspect > 1.5 && low) {
-        if (this._confirm(track, 'FALLEN', 'Person down on the ground', 0.65, now)) {
+      const low = boxCenter(track.bbox).y > this.canvas.height * 0.6;
+      const bodyHorizontal = Math.abs(motion.headY - motion.hipY) < motion.torso * 0.55;
+      const wideEnough = boxWidth(track.bbox) > motion.torso * 1.6;
+
+      if (aspect > 1.7 && low && bodyHorizontal && wideEnough) {
+        if (this._confirm(track, 'FALLEN', 'Person down on the ground', 0.7, now)) {
           events.push({
             category: 'FALLEN',
             type: 'PERSON DOWN / MEDICAL DISTRESS',
-            confidence: 0.65,
+            confidence: 0.7,
             trackId: track.id,
             detail: `Subject #${track.id} appears to be on the ground`,
           });
