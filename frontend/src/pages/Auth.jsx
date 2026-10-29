@@ -1,13 +1,14 @@
 import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
-import { Shield } from 'lucide-react';
+import { Shield, Lock } from 'lucide-react';
 
 export default function Auth() {
   const [isLogin, setIsLogin] = useState(true);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [role, setRole] = useState('Police');
+  const [adminKey, setAdminKey] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   
@@ -27,12 +28,17 @@ export default function Auth() {
         setError('Invalid username or password');
       }
     } else {
-      const success = await register(username, password, role);
-      if (success) {
+      if (role === 'Admin' && !adminKey.trim()) {
+        setError('Admin Security Key is strictly required for Administrator accounts.');
+        setLoading(false);
+        return;
+      }
+      const res = await register(username, password, role, adminKey);
+      if (res.success) {
         setIsLogin(true);
         setError('Registration successful! Please login.');
       } else {
-        setError('Registration failed. Username may exist.');
+        setError(res.message || 'Registration failed. Username may exist or Admin Key is invalid.');
       }
     }
     setLoading(false);
@@ -74,15 +80,37 @@ export default function Auth() {
           />
           
           {!isLogin && (
-            <select 
-              className="input-glass"
-              value={role} 
-              onChange={(e) => setRole(e.target.value)}
-              style={{ backgroundColor: 'rgba(15,23,42,0.9)' }}
-            >
-              <option value="Police">Police Operator</option>
-              <option value="Admin">Administrator</option>
-            </select>
+            <>
+              <select 
+                className="input-glass"
+                value={role} 
+                onChange={(e) => setRole(e.target.value)}
+                style={{ backgroundColor: 'rgba(15,23,42,0.9)' }}
+              >
+                <option value="Police">Police Operator</option>
+                <option value="Admin">Administrator (Core Team Only)</option>
+              </select>
+
+              {role === 'Admin' && (
+                <div style={{ marginTop: '4px', marginBottom: '8px', textAlign: 'left' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', color: '#f59e0b', marginBottom: '6px', fontWeight: 600 }}>
+                    <Lock size={14} /> Team Master Security Passkey
+                  </div>
+                  <input
+                    className="input-glass"
+                    type="password"
+                    placeholder="Enter Master Admin Passkey"
+                    value={adminKey}
+                    onChange={(e) => setAdminKey(e.target.value)}
+                    required
+                    style={{ borderColor: 'rgba(245, 158, 11, 0.5)', background: 'rgba(245, 158, 11, 0.08)' }}
+                  />
+                  <span style={{ fontSize: '0.74rem', color: '#94a3b8', display: 'block', marginTop: '-4px' }}>
+                    Restricted: Only core developers with the team key can register as Admin.
+                  </span>
+                </div>
+              )}
+            </>
           )}
 
           <button type="submit" className="btn-primary" style={{ marginTop: '16px' }} disabled={loading}>

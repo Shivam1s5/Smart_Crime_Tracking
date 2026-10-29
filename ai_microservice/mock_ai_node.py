@@ -2,15 +2,23 @@ import requests
 import time
 import random
 import sys
+import os
+
+# Check if user wants to launch the real YOLO Computer Vision engine
+if "--real" in sys.argv:
+    from stream_worker import main as run_real_worker
+    sys.exit(run_real_worker())
 
 # Change this to your live Render backend URL when testing on production
-BACKEND_URL = "http://localhost:5000" 
+BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:5000")
 # BACKEND_URL = "https://smart-crime-tracking.onrender.com"
 
 print("========================================")
-print(" AI CAMERA SURVEILLANCE NODE (MOCK)")
+print(" AI CAMERA SURVEILLANCE NODE")
+print(" Tip: Pass --real to run Real YOLOv12 Node")
 print("========================================")
 print(f"Connecting to Backend: {BACKEND_URL}")
+
 
 cameras = [
     {"id": "CAM-001", "area": "Downtown"},

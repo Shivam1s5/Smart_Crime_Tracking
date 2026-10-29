@@ -30,6 +30,9 @@ export default function AdminDashboard() {
   const [alerts, setAlerts] = useState([]);
   const [usersList, setUsersList] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [liveFeeds, setLiveFeeds] = useState({});
+  const [viewMode, setViewMode] = useState('WALL'); // 'WALL' | 'TABLE'
+  const [selectedFeedCam, setSelectedFeedCam] = useState(null);
 
   // Modals & Forms
   const [showAddModal, setShowAddModal] = useState(false);
@@ -65,6 +68,16 @@ export default function AdminDashboard() {
       setCameras((prev) => prev.map(c => c.camera_id === updatedCam.camera_id ? updatedCam : c));
     });
 
+    // Real-time live camera feed broadcast listener
+    socket.on('live_feed_update', (feed) => {
+      if (feed && feed.camera_id) {
+        setLiveFeeds((prev) => ({
+          ...prev,
+          [feed.camera_id]: feed
+        }));
+      }
+    });
+
     return () => socket.disconnect();
   }, []);
 
@@ -83,6 +96,11 @@ export default function AdminDashboard() {
       setCameras(camsRes.data || []);
       setAlerts(alertsRes.data || []);
       setUsersList(usersRes.data || []);
+
+      // Fetch active live feeds
+      axios.get(`${API_BASE}/api/cameras/live_feeds`, { headers })
+        .then(res => { if (res.data) setLiveFeeds(res.data); })
+        .catch(() => {});
     } catch (err) {
       console.error("Failed to load admin data:", err);
     }
@@ -215,6 +233,58 @@ export default function AdminDashboard() {
               <X size={32} />
             </button>
             <img src={selectedScreenshot} alt="Threat Evidence" style={{ maxWidth: '100%', maxHeight: '80vh', borderRadius: '8px', border: '2px solid #ef4444' }} />
+          </div>
+        </div>
+      )}
+
+      {/* Fullscreen Live Camera Monitor Modal */}
+      {selectedFeedCam && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, width: '100%', height: '100%',
+          background: 'rgba(0,0,0,0.94)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 10000,
+          backdropFilter: 'blur(8px)'
+        }}>
+          <div style={{ position: 'relative', width: '90%', maxWidth: '1000px', background: '#090d16', borderRadius: '12px', border: '1px solid rgba(56, 189, 248, 0.4)', padding: '16px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <span style={{ background: '#10b981', color: '#090d16', padding: '2px 8px', borderRadius: '4px', fontSize: '0.75rem', fontWeight: 'bold' }}>LIVE</span>
+                <h3 style={{ margin: 0, fontSize: '1.2rem', color: '#fff' }}>{selectedFeedCam.name} ({selectedFeedCam.area})</h3>
+                <span style={{ fontSize: '0.8rem', color: '#64748b' }}>{selectedFeedCam.camera_id}</span>
+              </div>
+              <button onClick={() => setSelectedFeedCam(null)} style={{ background: 'transparent', border: 'none', color: '#fff', cursor: 'pointer' }}>
+                <X size={26} />
+              </button>
+            </div>
+            
+            <div style={{ width: '100%', aspectRatio: '16 / 9', background: '#000', borderRadius: '8px', overflow: 'hidden', position: 'relative', display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+              {liveFeeds[selectedFeedCam.camera_id]?.frame ? (
+                <img src={liveFeeds[selectedFeedCam.camera_id].frame} alt="Live Stream" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+              ) : selectedFeedCam.stream_url && selectedFeedCam.stream_url.includes('youtube.com') ? (
+                <iframe src={selectedFeedCam.stream_url} frameBorder="0" allow="autoplay; encrypted-media" style={{ width: '100%', height: '100%' }}></iframe>
+              ) : selectedFeedCam.stream_url && selectedFeedCam.stream_url !== 'LOCAL_WEBCAM' ? (
+                <img src={selectedFeedCam.stream_url} alt="Live Stream" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+              ) : (
+                <div style={{ color: 'var(--text-secondary)', textAlign: 'center' }}>
+                  <Activity size={32} color="#38bdf8" style={{ marginBottom: '8px' }} />
+                  <div>Tactical Camera Node Standby</div>
+                  <span style={{ fontSize: '0.8rem', color: '#64748b' }}>Waiting for operator stream relay to broadcast</span>
+                </div>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '12px' }}>
+              <div style={{ display: 'flex', gap: '16px', fontSize: '0.85rem' }}>
+                <span style={{ color: '#38bdf8' }}>👥 Gathering Limit: <strong>{selectedFeedCam.gathering_threshold || 5} Persons</strong></span>
+                <span style={{ color: '#eab308' }}>🔊 Sound Threshold: <strong>{selectedFeedCam.sound_threshold || 75} dB</strong></span>
+              </div>
+              <button 
+                onClick={() => { setSelectedFeedCam(null); handleOpenThresholdModal(selectedFeedCam); }}
+                className="btn-primary" 
+                style={{ padding: '6px 14px', fontSize: '0.82rem', display: 'flex', alignItems: 'center', gap: '6px' }}
+              >
+                <SlidersHorizontal size={14} /> Adjust Thresholds
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -558,22 +628,67 @@ export default function AdminDashboard() {
         
         {/* Left Column: Camera Fleet & Live Gathering Threshold Management */}
         <div className="glass-panel" style={{ padding: '24px', borderRadius: '12px', display: 'flex', flexDirection: 'column' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px', flexWrap: 'wrap', gap: '12px' }}>
             <div>
               <h3 style={{ margin: 0, fontSize: '1.15rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <Video size={20} color="var(--accent)" /> Camera Network & Gathering Limits
+                <Video size={20} color="var(--accent)" /> Real-Time Surveillance & Safety Grid
               </h3>
               <p style={{ margin: '4px 0 0 0', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
-                Configure safe person capacity limits per surveillance area. AI automatically dispatches alert when limit is broken.
+                Live multi-camera fleet stream feeds with real-time crowd and acoustic monitoring.
               </p>
             </div>
-            <button 
-              className="btn-primary" 
-              style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 14px', fontSize: '0.88rem' }}
-              onClick={() => setShowAddModal(true)}
-            >
-              <Plus size={16} /> Deploy Camera
-            </button>
+            
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              {/* View Mode Toggle */}
+              <div style={{ display: 'flex', background: 'rgba(255,255,255,0.06)', padding: '3px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)' }}>
+                <button
+                  type="button"
+                  onClick={() => setViewMode('WALL')}
+                  style={{
+                    background: viewMode === 'WALL' ? 'var(--accent)' : 'transparent',
+                    color: viewMode === 'WALL' ? '#090d16' : '#cbd5e1',
+                    border: 'none',
+                    borderRadius: '6px',
+                    padding: '5px 12px',
+                    fontSize: '0.8rem',
+                    fontWeight: 'bold',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px'
+                  }}
+                >
+                  <Video size={14} /> Video Wall Grid
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewMode('TABLE')}
+                  style={{
+                    background: viewMode === 'TABLE' ? 'var(--accent)' : 'transparent',
+                    color: viewMode === 'TABLE' ? '#090d16' : '#cbd5e1',
+                    border: 'none',
+                    borderRadius: '6px',
+                    padding: '5px 12px',
+                    fontSize: '0.8rem',
+                    fontWeight: 'bold',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px'
+                  }}
+                >
+                  <SlidersHorizontal size={14} /> Fleet Table
+                </button>
+              </div>
+
+              <button 
+                className="btn-primary" 
+                style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 14px', fontSize: '0.88rem' }}
+                onClick={() => setShowAddModal(true)}
+              >
+                <Plus size={16} /> Deploy Camera
+              </button>
+            </div>
           </div>
 
           <div style={{ flex: 1, overflowY: 'auto' }}>
@@ -581,7 +696,141 @@ export default function AdminDashboard() {
               <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-secondary)' }}>
                 No cameras currently configured. Click "Deploy Camera" to add.
               </div>
+            ) : viewMode === 'WALL' ? (
+              /* REAL-TIME CCTV VIDEO WALL GRID FOR ALL CAMERAS */
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '16px' }}>
+                {cameras.map((cam) => {
+                  const feed = liveFeeds[cam.camera_id];
+                  const isRelaying = feed && feed.frame;
+                  const isExternalStream = cam.stream_url && cam.stream_url !== 'LOCAL_WEBCAM';
+                  const liveGathering = feed?.gathering_count !== undefined ? feed.gathering_count : 0;
+                  const liveSound = feed?.sound_level !== undefined ? feed.sound_level : 42;
+                  const isGatheringBreached = liveGathering > (cam.gathering_threshold || 5);
+                  const isSoundBreached = liveSound > (cam.sound_threshold || 75);
+
+                  return (
+                    <div 
+                      key={cam._id || cam.camera_id} 
+                      style={{
+                        background: 'rgba(15, 23, 42, 0.85)',
+                        border: isGatheringBreached || isSoundBreached ? '1px solid #ef4444' : '1px solid rgba(255, 255, 255, 0.12)',
+                        borderRadius: '10px',
+                        overflow: 'hidden',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        boxShadow: isGatheringBreached || isSoundBreached ? '0 0 14px rgba(239, 68, 68, 0.35)' : 'none',
+                        transition: 'all 0.2s ease'
+                      }}
+                    >
+                      {/* Video Feed Monitor Display */}
+                      <div style={{ position: 'relative', width: '100%', aspectRatio: '16 / 9', background: '#000', overflow: 'hidden' }}>
+                        {/* Top Bar on Live Monitor */}
+                        <div style={{ position: 'absolute', top: 8, left: 8, zIndex: 10, display: 'flex', gap: '6px' }}>
+                          {isRelaying ? (
+                            <span style={{ 
+                              background: '#10b981', color: '#090d16', fontSize: '0.68rem', fontWeight: 'bold', 
+                              padding: '2px 8px', borderRadius: '4px', display: 'flex', alignItems: 'center', gap: '5px',
+                              boxShadow: '0 0 8px rgba(16, 185, 129, 0.8)'
+                            }}>
+                              <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#090d16' }}></span>
+                              LIVE STREAM
+                            </span>
+                          ) : isExternalStream ? (
+                            <span style={{ background: '#38bdf8', color: '#090d16', fontSize: '0.68rem', fontWeight: 'bold', padding: '2px 8px', borderRadius: '4px' }}>
+                              ACTIVE FEED
+                            </span>
+                          ) : (
+                            <span style={{ background: 'rgba(71, 85, 105, 0.85)', color: '#fff', fontSize: '0.68rem', padding: '2px 8px', borderRadius: '4px' }}>
+                              STANDBY / READY
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Top Right Quick Controls */}
+                        <div style={{ position: 'absolute', top: 8, right: 8, zIndex: 10, display: 'flex', gap: '6px' }}>
+                          <button 
+                            onClick={() => setSelectedFeedCam(cam)}
+                            style={{ background: 'rgba(0,0,0,0.7)', border: '1px solid rgba(255,255,255,0.2)', color: '#fff', padding: '4px', borderRadius: '4px', cursor: 'pointer' }}
+                            title="Fullscreen Surveillance Monitor"
+                          >
+                            <Maximize2 size={13} />
+                          </button>
+                          <button 
+                            onClick={() => handleOpenThresholdModal(cam)}
+                            style={{ background: 'rgba(0,0,0,0.7)', border: '1px solid rgba(255,255,255,0.2)', color: '#38bdf8', padding: '4px', borderRadius: '4px', cursor: 'pointer' }}
+                            title="Configure Safety Limits"
+                          >
+                            <SlidersHorizontal size={13} />
+                          </button>
+                          <button 
+                            onClick={() => handleDeleteCamera(cam.camera_id)}
+                            style={{ background: 'rgba(239, 68, 68, 0.85)', border: 'none', color: '#fff', padding: '4px', borderRadius: '4px', cursor: 'pointer' }}
+                            title="Delete Camera"
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+
+                        {/* Live Feed Video Element */}
+                        {isRelaying ? (
+                          <img src={feed.frame} alt="Live Stream" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                        ) : cam.stream_url && cam.stream_url.includes('youtube.com') ? (
+                          <iframe src={cam.stream_url} frameBorder="0" allow="autoplay; encrypted-media" style={{ width: '100%', height: '100%' }}></iframe>
+                        ) : cam.stream_url && cam.stream_url !== 'LOCAL_WEBCAM' ? (
+                          <img src={cam.stream_url} alt="Live Stream" style={{ width: '100%', height: '100%', objectFit: 'cover' }} 
+                            onError={(e) => { e.target.style.display = 'none'; }}
+                          />
+                        ) : (
+                          <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: '#64748b', fontSize: '0.78rem' }}>
+                            <Camera size={26} color="#38bdf8" style={{ marginBottom: '6px', opacity: 0.7 }} />
+                            <span>Operator Camera Node</span>
+                            <span style={{ fontSize: '0.68rem', color: '#475569' }}>Real-time relay starts when operator is live</span>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Card Info & Live Metrics Footer */}
+                      <div style={{ padding: '12px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                          <div>
+                            <h4 style={{ margin: 0, fontSize: '0.92rem', color: '#f8fafc', fontWeight: 600 }}>{cam.name}</h4>
+                            <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>{cam.area} • {cam.camera_id}</span>
+                          </div>
+                        </div>
+
+                        {/* Live Safety Limit Meters */}
+                        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                          <div style={{
+                            flex: 1, minWidth: '100px',
+                            background: isGatheringBreached ? 'rgba(239, 68, 68, 0.2)' : 'rgba(56, 189, 248, 0.1)',
+                            border: isGatheringBreached ? '1px solid #ef4444' : '1px solid rgba(56, 189, 248, 0.25)',
+                            borderRadius: '6px', padding: '6px 8px'
+                          }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: isGatheringBreached ? '#ef4444' : '#38bdf8', fontWeight: 'bold' }}>
+                              <span>👥 Crowd</span>
+                              <span>{liveGathering} / {cam.gathering_threshold || 5}</span>
+                            </div>
+                          </div>
+
+                          <div style={{
+                            flex: 1, minWidth: '100px',
+                            background: isSoundBreached ? 'rgba(239, 68, 68, 0.2)' : 'rgba(234, 179, 8, 0.1)',
+                            border: isSoundBreached ? '1px solid #ef4444' : '1px solid rgba(234, 179, 8, 0.25)',
+                            borderRadius: '6px', padding: '6px 8px'
+                          }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: isSoundBreached ? '#ef4444' : '#eab308', fontWeight: 'bold' }}>
+                              <span>🔊 Sound</span>
+                              <span>{liveSound} dB / {cam.sound_threshold || 75} dB</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             ) : (
+              /* FLEET TABLE VIEW */
               <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.88rem' }}>
                 <thead>
                   <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', color: '#94a3b8' }}>

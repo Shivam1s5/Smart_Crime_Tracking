@@ -8,6 +8,7 @@ from ml_clustering import calculate_risk_zones
 import os
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
+import time
 from bson.objectid import ObjectId
 import cloudinary
 import cloudinary.uploader
@@ -44,6 +45,15 @@ def register():
         role = data.get('role', 'Police')
         if role not in ['Police', 'Admin']:
             role = 'Police'
+
+        # Restrict Admin registration to authorized team members with secret key
+        if role == 'Admin':
+            admin_key = data.get('admin_key', '')
+            expected_key = os.getenv('ADMIN_SECRET_KEY', 'SCT-COMMAND-2026-ROOT')
+            if not admin_key or admin_key.strip() != expected_key.strip():
+                return jsonify({
+                    'message': 'Unauthorized: Invalid Admin Security Authorization Key. Only authorized core team members can register as Administrator.'
+                }), 403
 
         new_user = {
             'username': data.get('username'),
@@ -145,6 +155,9 @@ def search_records():
         
     return jsonify(records), 200
 
+# Real-time multi-device camera feed broadcast cache: camera_id -> feed_data
+latest_camera_feeds = {}
+
 # WebSocket connections
 @socketio.on('connect')
 def handle_connect():
@@ -153,6 +166,33 @@ def handle_connect():
 @socketio.on('disconnect')
 def handle_disconnect():
     print('Client disconnected')
+
+@socketio.on('broadcast_camera_frame')
+def handle_broadcast_camera_frame(data):
+    if not data or not isinstance(data, dict):
+        return
+    cam_id = data.get('camera_id')
+    if cam_id:
+        feed_info = {
+            'camera_id': cam_id,
+            'frame': data.get('frame'),
+            'gathering_count': data.get('gathering_count', 0),
+            'sound_level': data.get('sound_level', 0),
+            'threat': data.get('threat', None),
+            'area': data.get('area', ''),
+            'timestamp': datetime.utcnow().isoformat()
+        }
+        latest_camera_feeds[cam_id] = feed_info
+        # Relay live feed frame to all other connected clients (Police & Admin dashboards)
+        socketio.emit('live_feed_update', feed_info, broadcast=True, include_self=False)
+
+@app.route('/api/cameras/live_feeds', methods=['GET'])
+@jwt_required()
+def get_live_feeds():
+    claims = get_jwt()
+    if claims.get('role') not in ['Police', 'Admin']:
+        return jsonify({'message': 'Unauthorized'}), 403
+    return jsonify(latest_camera_feeds), 200
 
 @app.route('/api/cameras', methods=['GET'])
 @jwt_required()
@@ -326,6 +366,9 @@ def delete_alert(alert_id):
     alerts_collection.delete_one({'_id': ObjectId(alert_id)})
     return jsonify({'message': 'Alert deleted successfully'}), 200
 
+# Server-side cooldown cache: (camera_id, alert_category) -> timestamp
+alert_cooldowns = {}
+
 @app.route('/api/alerts/trigger', methods=['POST'])
 def trigger_alert():
     # This endpoint is called by the AI Microservice (or frontend now)
@@ -334,6 +377,39 @@ def trigger_alert():
     if not data or 'camera_id' not in data:
         return jsonify({'error': 'Invalid payload'}), 400
         
+    camera_id = data.get('camera_id')
+    alert_type = (data.get('type') or 'SUSPICIOUS ACTIVITY').upper()
+
+    # Categorize threat & determine cooldown window to prevent duplicate spamming
+    if 'GATHERING' in alert_type or 'CROWD' in alert_type:
+        category = 'CROWD'
+        cooldown_sec = 45.0
+    elif 'NOISE' in alert_type or 'AUDIO' in alert_type:
+        category = 'NOISE'
+        cooldown_sec = 40.0
+    elif 'WEAPON' in alert_type or 'GUN' in alert_type or 'KNIFE' in alert_type:
+        category = 'WEAPON'
+        cooldown_sec = 18.0
+    elif 'ASSAULT' in alert_type or 'PUNCH' in alert_type or 'COMBAT' in alert_type or 'BRAWL' in alert_type:
+        category = 'COMBAT'
+        cooldown_sec = 12.0
+    else:
+        category = 'GENERAL'
+        cooldown_sec = 20.0
+
+    now = time.time()
+    cache_key = (camera_id, category)
+    last_triggered = alert_cooldowns.get(cache_key, 0)
+
+    if (now - last_triggered) < cooldown_sec:
+        # Cleanly suppress duplicate notification
+        return jsonify({
+            'message': f'Alert suppressed by cooldown ({int(cooldown_sec - (now - last_triggered))}s remaining)',
+            'suppressed': True
+        }), 200
+
+    alert_cooldowns[cache_key] = now
+    
     image_base64 = data.get('image_base64')
     image_url = data.get('image_url', '')
     

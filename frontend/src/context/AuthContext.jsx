@@ -34,13 +34,19 @@ export const AuthProvider = ({ children }) => {
     }
   };
 
-  const register = async (username, password, role) => {
+  const register = async (username, password, role, adminKey = '') => {
     try {
-      await axios.post(`${import.meta.env.VITE_API_URL || 'https://smart-crime-tracking.onrender.com'}/api/auth/register`, { username, password, role });
-      return true;
+      await axios.post(`${import.meta.env.VITE_API_URL || 'https://smart-crime-tracking.onrender.com'}/api/auth/register`, { 
+        username, 
+        password, 
+        role,
+        admin_key: adminKey 
+      });
+      return { success: true };
     } catch (err) {
       console.error(err);
-      return false;
+      const msg = err.response?.data?.message || err.response?.data?.error || 'Registration failed.';
+      return { success: false, message: msg };
     }
   };
 
