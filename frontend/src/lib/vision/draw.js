@@ -202,6 +202,7 @@ export function drawScene(ctx, canvas, scene) {
     soundLimit = 75,
     fps = 0,
     skeletonEdges = [],
+    diag = {},
   } = scene;
 
   try {
@@ -263,6 +264,37 @@ export function drawScene(ctx, canvas, scene) {
     ctx.stroke();
     ctx.fillStyle = noise ? '#fed7aa' : '#fde68a';
     ctx.fillText(right, canvas.width - rightWidth - 2, 16);
+    ctx.restore();
+
+    // Liveness heartbeat. This is drawn on every frame, even with nobody in
+    // view, so "engine running but nothing on screen" can never be ambiguous
+    // again: if this chip is visible the render path works.
+    ctx.save();
+    ctx.font = FONT_SMALL;
+    ctx.textBaseline = 'top';
+    const persons = diag.persons ?? gatheringCount;
+    const maxSpeed = diag.maxSpeed ?? 0;
+    const heartbeat = `AI LIVE · ${fps.toFixed(1)} FPS · ${persons} TRACKED · MAX ${maxSpeed.toFixed(1)} t/s`;
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.88)';
+    ctx.strokeStyle = 'rgba(34, 211, 238, 0.65)';
+    ctx.lineWidth = 1.2;
+    roundRect(ctx, 10, canvas.height - 50, ctx.measureText(heartbeat).width + 18, 22, 4);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#67e8f9';
+    ctx.fillText(heartbeat, 18, canvas.height - 44);
+
+    if (diag.error) {
+      const message = String(diag.error).slice(0, 120);
+      const errorText = `ENGINE ERROR · ${message}`;
+      ctx.fillStyle = 'rgba(127, 29, 29, 0.94)';
+      ctx.strokeStyle = '#ef4444';
+      roundRect(ctx, 10, canvas.height - 76, ctx.measureText(errorText).width + 18, 22, 4);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = '#fecaca';
+      ctx.fillText(errorText, 18, canvas.height - 70);
+    }
     ctx.restore();
 
     // Forensic footer: timestamp + engine state.

@@ -36,10 +36,10 @@ import { drawScene } from './draw.js';
 /** Tunable pipeline configuration. All speeds are in torso-lengths / second. */
 export const DEFAULTS = {
   // Detection gates
-  personMinScore: 0.45,
+  personMinScore: 0.4,
   poseMinScore: 0.3,
   maxPoses: 8,
-  objectMinScore: 0.35,
+  objectMinScore: 0.3,
 
   // Frame pacing
   targetFps: 9,
@@ -51,13 +51,13 @@ export const DEFAULTS = {
   weaponBindTorsoRatio: 1.8,
 
   // Motion analysis
-  strikeSpeed: 2.2,
-  brawlSpeed: 1.5,
+  strikeSpeed: 1.6,
+  brawlSpeed: 1.1,
   contactRatio: 1.15,
   smoothAlpha: 0.5,
 
   // Hysteresis
-  confirmFrames: { STRIKING: 3, GUARD: 4, ASSAULT: 2, BRAWL: 3, FALLEN: 3 },
+  confirmFrames: { STRIKING: 2, GUARD: 3, ASSAULT: 2, BRAWL: 2, FALLEN: 3 },
   stateHoldMs: 1200,
 
   // Alert suppression windows (ms)
@@ -152,6 +152,7 @@ export class ThreatEngine {
     this.onAlert = options.onAlert || (() => {});
     this.onError = options.onError || (() => {});
     this.onStatus = options.onStatus || (() => {});
+    this.onWarn = options.onWarn || (() => {});
 
     this.tracker = new PersonTracker();
     this.weaponMemory = new WeaponMemory({
@@ -175,6 +176,28 @@ export class ThreatEngine {
     this.soundLimit = 75;
     this.video = null;
     this.canvas = null;
+    this.getVideo = null;
+    this.getCanvas = null;
+    this.lastError = null;
+    this._frameHadError = false;
+  }
+
+  _fail(message) {
+    this._frameHadError = true;
+    if (this.lastError !== message) {
+      this.lastError = message;
+      this.onError(new Error(message));
+    }
+  }
+
+  _warn(modelName, error) {
+    this._frameHadError = true;
+    const message = `${modelName}: ${error?.message || error}`;
+    if (this.lastError !== message) {
+      this.lastError = message;
+      console.warn('[ThreatEngine]', message);
+      this.onWarn(message);
+    }
   }
 
   async init(onProgress) {
@@ -194,12 +217,34 @@ export class ThreatEngine {
     if (Number.isFinite(soundLimit)) this.soundLimit = soundLimit;
   }
 
-  start(video, canvas) {
-    if (!video || !canvas) throw new Error('ThreatEngine.start requires a video and a canvas element.');
+  /**
+   * Begin monitoring.
+   *
+   * Accepts either `start(video, canvas)` or `start({ getVideo, getCanvas })`.
+   * The getter form is preferred: React can replace the <video>/<canvas> nodes
+   * (a camera card remounts when its key changes), and a cached element
+   * reference would then silently keep drawing into a detached canvas — which
+   * is exactly the "engine runs but nothing appears" failure.
+   */
+  start(videoOrRefs, canvasArg) {
+    if (videoOrRefs && typeof videoOrRefs === 'object' && typeof videoOrRefs.getVideo === 'function') {
+      this.getVideo = videoOrRefs.getVideo;
+      this.getCanvas = videoOrRefs.getCanvas;
+    } else {
+      this.getVideo = () => videoOrRefs;
+      this.getCanvas = () => canvasArg;
+    }
+
     if (this.running) this.stop();
-    this.video = video;
-    this.canvas = canvas;
+
+    this.video = this.getVideo();
+    this.canvas = this.getCanvas();
+    if (!this.video || !this.canvas) {
+      throw new Error('ThreatEngine.start requires a video and a canvas element.');
+    }
+
     this.running = true;
+    this.lastError = null;
     this.tracker.reset();
     this.weaponMemory.reset();
     this.onStatus('running');
@@ -244,9 +289,32 @@ export class ThreatEngine {
   }
 
   async _processFrame(now) {
-    const { video, canvas } = this;
-    if (!video || !canvas) return;
-    if (video.readyState < 2 || !video.videoWidth || !video.videoHeight) return;
+    // Resolve the DOM nodes on every frame. React can replace a <video> or
+    // <canvas> when a camera card remounts; a cached reference would then keep
+    // drawing into a detached canvas, which looks exactly like "nothing draws".
+    const video = this.getVideo ? this.getVideo() : this.video;
+    const canvas = this.getCanvas ? this.getCanvas() : this.canvas;
+    this.video = video;
+    this.canvas = canvas;
+    this._frameHadError = false;
+
+    if (!video || !canvas) {
+      this._fail('camera feed or overlay canvas is not mounted');
+      return;
+    }
+    if (video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
+      // A stalled feed is another way to get "engine running, nothing drawn".
+      this._stalledFrames = (this._stalledFrames || 0) + 1;
+      if (this._stalledFrames > 20) {
+        this._fail('camera feed is not producing frames (video paused or blocked)');
+      }
+      return;
+    }
+    this._stalledFrames = 0;
+    if (!this.models) {
+      this._fail('AI models are not loaded yet');
+      return;
+    }
 
     if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
       canvas.width = video.videoWidth;
@@ -254,16 +322,34 @@ export class ThreatEngine {
     }
 
     const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      this._fail('2D canvas context unavailable');
+      return;
+    }
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // 1. Raw model output ---------------------------------------------------
-    const [objectPredictions, poses] = await Promise.all([
-      this.models.objectModel.detect(video, 24, this.config.objectMinScore),
-      this.models.poseModel.estimatePoses(video, {
-        maxPoses: this.config.maxPoses,
-        flipHorizontal: false,
-      }),
-    ]);
+    // 1. Raw model output.
+    // Each model is isolated on purpose: if the pose engine throws, the person
+    // frames from the object detector must still render. One broken model must
+    // never blank the whole overlay (that was the previous failure mode).
+    let objectPredictions = [];
+    let poses = [];
+
+    try {
+      objectPredictions = (await this.models.objectModel.detect(video, 24, this.config.objectMinScore)) || [];
+    } catch (error) {
+      this._warn('object detector', error);
+    }
+
+    try {
+      poses =
+        (await this.models.poseModel.estimatePoses(video, {
+          maxPoses: this.config.maxPoses,
+          flipHorizontal: false,
+        })) || [];
+    } catch (error) {
+      this._warn('pose engine', error);
+    }
 
     const poseEntries = (poses || [])
       .map((pose) => ({ pose, box: boxFromPoints(pose.keypoints, 0.25) }))
@@ -368,6 +454,8 @@ export class ThreatEngine {
 
     // 7. Render before alerting, so evidence screenshots contain the overlay.
     const gatheringCount = tracks.length;
+    const maxSpeed = tracks.reduce((peak, track) => Math.max(peak, track.motion?.speed || 0), 0);
+
     drawScene(ctx, canvas, {
       tracks,
       weapons,
@@ -377,6 +465,7 @@ export class ThreatEngine {
       soundLimit: this.soundLimit,
       fps: this.fps,
       skeletonEdges: SKELETON_EDGES,
+      diag: { persons: gatheringCount, maxSpeed, error: this.lastError },
     });
 
     this.onSnapshot({
@@ -385,7 +474,11 @@ export class ThreatEngine {
       gathering: gatheringCount,
       fps: this.fps,
       sound: this.soundLevel,
+      maxSpeed,
+      error: this.lastError,
     });
+
+    if (!this._frameHadError) this.lastError = null;
 
     // 8. Alerts ------------------------------------------------------------
     for (const event of events) {
@@ -659,7 +752,10 @@ export class ThreatEngine {
       if (!motion || motion.stale) continue;
       if (track.victimId) continue;
 
-      const extended = motion.armExt >= 0.85;
+      // A punch thrown toward the camera barely changes 2D arm extension
+      // (foreshortening), so accept either a clearly extended arm or an
+      // unmistakably fast snap.
+      const extended = motion.armExt >= 0.55 || motion.speed >= 3.2;
       const raised = motion.activeLimb ? motion.activeLimb.y < motion.hipY : false;
       const fast = motion.speed >= cfg.strikeSpeed;
 

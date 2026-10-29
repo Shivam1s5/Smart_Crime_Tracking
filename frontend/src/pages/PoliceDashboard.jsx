@@ -525,6 +525,7 @@ export default function PoliceDashboard() {
   // ───────────────────────────────────────────────────────────────────────
   const engineRef = useRef(null);
   const [engineStatus, setEngineStatus] = useState('idle');
+  const [engineDiag, setEngineDiag] = useState({ fps: 0, persons: 0, maxSpeed: 0, error: null });
 
   const activeCamera = () =>
     (camerasRef.current || []).find((cam) => cam.stream_url === 'LOCAL_WEBCAM') ||
@@ -535,11 +536,18 @@ export default function PoliceDashboard() {
     if (engineRef.current) return engineRef.current;
 
     engineRef.current = new ThreatEngine({
-      onSnapshot: ({ gathering }) => {
+      onSnapshot: ({ gathering, fps, maxSpeed, error }) => {
         const cam = activeCamera();
-        if (!cam) return;
-        setLiveGatheringCounts((prev) =>
-          prev[cam.camera_id] === gathering ? prev : { ...prev, [cam.camera_id]: gathering },
+        if (cam) {
+          setLiveGatheringCounts((prev) =>
+            prev[cam.camera_id] === gathering ? prev : { ...prev, [cam.camera_id]: gathering },
+          );
+        }
+        setEngineDiag((prev) =>
+          prev.fps === Math.round(fps) && prev.persons === gathering &&
+          prev.maxSpeed === Math.round(maxSpeed * 10) && prev.error === error
+            ? prev
+            : { fps: Math.round(fps), persons: gathering, maxSpeed: Math.round(maxSpeed * 10), error },
         );
       },
       onAlert: (event) => {
@@ -547,6 +555,7 @@ export default function PoliceDashboard() {
         triggerRealAlert(event.type, event.confidence);
       },
       onError: (error) => console.error('ThreatEngine frame error:', error),
+      onWarn: (message) => console.warn('[AI]', message),
       onStatus: (status) => setEngineStatus(status),
     });
 
@@ -562,8 +571,7 @@ export default function PoliceDashboard() {
       await engine.init((message) => console.info('[AI]', message));
 
       const video = laptopVideoRef.current;
-      const canvas = canvasRef.current;
-      if (!video || !canvas) {
+      if (!video || !canvasRef.current) {
         setIsProcessing(false);
         isProcessingRef.current = false;
         alert('Camera feed is not ready yet. Restore the operator webcam and try again.');
@@ -583,7 +591,13 @@ export default function PoliceDashboard() {
         gatheringLimit: Number(cam?.gathering_threshold) || 5,
         soundLimit: Number(cam?.sound_threshold) || 75,
       });
-      engine.start(video, canvas);
+      engine.start({
+        // Getter form: the engine re-reads these every frame, so it survives a
+        // React remount of the camera card instead of drawing into a detached
+        // canvas (which looked like "engine runs but nothing appears").
+        getVideo: () => laptopVideoRef.current,
+        getCanvas: () => canvasRef.current,
+      });
     } catch (error) {
       console.error('AI Initialization Error:', error);
       setIsProcessing(false);
@@ -1067,7 +1081,7 @@ export default function PoliceDashboard() {
                       }}>
                         <Users size={12} color={(liveGatheringCounts[cam.camera_id] || 0) > (cam.gathering_threshold || 5) ? '#fff' : '#38bdf8'} />
                         <span>
-                          Gathering: {liveGatheringCounts[cam.camera_id] !== undefined ? liveGatheringCounts[cam.camera_id] : (cam.stream_url === 'LOCAL_WEBCAM' ? (isProcessing ? 0 : 'Idle') : '1')} / Limit: {cam.gathering_threshold || 5}
+                          Gathering: {liveGatheringCounts[cam.camera_id] !== undefined ? liveGatheringCounts[cam.camera_id] : '—'} / Limit: {cam.gathering_threshold || 5}
                         </span>
                       </div>
 
@@ -1227,6 +1241,18 @@ export default function PoliceDashboard() {
                   Crowd &amp; noise limits are read live from the active camera.
                 </span>
               </div>
+
+              <div style={{ display: 'flex', gap: '14px', flexWrap: 'wrap', fontSize: '0.78rem', marginBottom: '12px', color: 'var(--text-secondary)' }}>
+                <span>FPS: <strong style={{ color: '#67e8f9' }}>{engineDiag.fps}</strong></span>
+                <span>Tracked: <strong style={{ color: '#67e8f9' }}>{engineDiag.persons}</strong></span>
+                <span>Peak motion: <strong style={{ color: '#67e8f9' }}>{(engineDiag.maxSpeed / 10).toFixed(1)} torso/s</strong></span>
+              </div>
+
+              {engineDiag.error && (
+                <div className="alert-card" style={{ padding: '8px 12px', fontSize: '0.78rem', marginBottom: '12px' }}>
+                  Engine error: {engineDiag.error}
+                </div>
+              )}
               <div style={{ display: 'flex', gap: '8px' }}>
                   <button 
                     className="btn-primary" 
