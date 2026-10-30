@@ -606,25 +606,24 @@ export default function PoliceDashboard() {
     if (engineRef.current) return engineRef.current;
 
     engineRef.current = new ThreatEngine({
-      onSnapshot: ({ gathering, fps, maxSpeed, error, detectMs, poseMs, detections }) => {
+      onSnapshot: ({ gathering, fps, maxSpeed, error, detectMs, poseMs, detections, boxes, frameWidth, frameHeight }) => {
         const cam = activeCamera();
         if (cam) {
           setLiveGatheringCounts((prev) =>
             prev[cam.camera_id] === gathering ? prev : { ...prev, [cam.camera_id]: gathering },
           );
         }
-        setEngineDiag((prev) => {
-          const next = {
-            fps: Math.round(fps),
-            persons: gathering,
-            maxSpeed: Math.round(maxSpeed * 10),
-            error,
-            detectMs: detectMs || 0,
-            poseMs: poseMs || 0,
-            detections: (detections || []).map((d) => `${d.label} ${d.score.toFixed(2)}`).join(' · '),
-          };
-          const sig = [next.fps, next.persons, next.maxSpeed, next.error, next.detectMs, next.poseMs, next.detections].join('|');
-          return prev.sig === sig ? prev : { ...next, sig };
+        setEngineDiag({
+          fps: Math.round(fps),
+          persons: gathering,
+          maxSpeed: Math.round(maxSpeed * 10),
+          error,
+          detectMs: detectMs || 0,
+          poseMs: poseMs || 0,
+          detections: (detections || []).map((d) => `${d.label} ${d.score.toFixed(2)}`).join(' · '),
+          boxes: boxes || [],
+          frameWidth: frameWidth || 0,
+          frameHeight: frameHeight || 0,
         });
       },
       onAlert: (event) => {
@@ -1227,6 +1226,52 @@ export default function PoliceDashboard() {
                             <>
                               <LocalWebcam ref={laptopVideoRef} onAudioLevel={handleAudioLevel} />
                               <canvas ref={canvasRef} style={{ width: '100%', height: '100%', objectFit: 'cover', position: 'absolute', top: 0, left: 0, zIndex: 3, pointerEvents: 'none' }} />
+                              {/* Body frames as DOM elements. Independent of the
+                                  canvas compositing path, so they cannot silently
+                                  disappear the way the canvas overlay did. */}
+                              <div style={{ position: 'absolute', inset: 0, zIndex: 6, pointerEvents: 'none', overflow: 'hidden' }}>
+                                {(engineDiag.frameWidth > 0 && Array.isArray(engineDiag.boxes) ? engineDiag.boxes : []).map((box) => {
+                                  const fw = engineDiag.frameWidth;
+                                  const fh = engineDiag.frameHeight || 1;
+                                  const color = box.state === 'ARMED' ? '#dc2626'
+                                    : box.state === 'MOTION' ? '#94a3b8'
+                                      : box.state === 'GUARD' ? '#f59e0b'
+                                        : box.state === 'NORMAL' ? '#22d3ee'
+                                          : '#ef4444';
+                                  return (
+                                    <div
+                                      key={box.id}
+                                      style={{
+                                        position: 'absolute',
+                                        left: `${(box.x1 / fw) * 100}%`,
+                                        top: `${(box.y1 / fh) * 100}%`,
+                                        width: `${((box.x2 - box.x1) / fw) * 100}%`,
+                                        height: `${((box.y2 - box.y1) / fh) * 100}%`,
+                                        border: `2px solid ${color}`,
+                                        boxShadow: `0 0 10px ${color}`,
+                                        borderRadius: '4px',
+                                      }}
+                                    >
+                                      <span
+                                        style={{
+                                          position: 'absolute',
+                                          top: '-17px',
+                                          left: '-2px',
+                                          background: color,
+                                          color: '#0b1220',
+                                          fontSize: '10px',
+                                          fontWeight: 700,
+                                          padding: '1px 5px',
+                                          borderRadius: '3px',
+                                          whiteSpace: 'nowrap',
+                                        }}
+                                      >
+                                        #{box.id} · {box.label}
+                                      </span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
                             </>
                           ) : (
                             <div style={{ position: 'relative', zIndex: 2, width: '100%', height: '100%', background: '#000', color: 'var(--text-secondary)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '16px', fontSize: '0.8rem' }}>

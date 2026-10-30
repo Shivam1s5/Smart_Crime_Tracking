@@ -653,6 +653,20 @@ export class ThreatEngine {
       error: this.lastError,
       detectMs: Math.round(detectMs),
       poseMs: Math.round(poseMs),
+      // Raw geometry for the DOM overlay. Rendering the body frames as HTML
+      // elements removes any dependency on the canvas being visible/composited,
+      // which is what made them intermittently disappear.
+      frameWidth: canvas.width,
+      frameHeight: canvas.height,
+      boxes: tracks.slice(0, 16).map((track) => ({
+        id: track.id,
+        x1: track.bbox.x1,
+        y1: track.bbox.y1,
+        x2: track.bbox.x2,
+        y2: track.bbox.y2,
+        state: track.state,
+        label: track.stateLabel || 'Person',
+      })),
       // What the detector actually saw this frame, strongest first. This is the
       // quickest way to tell "the model never saw the knife" apart from
       // "the model saw it and a gate rejected it".
