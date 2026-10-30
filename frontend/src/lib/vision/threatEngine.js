@@ -51,7 +51,7 @@ export const DEFAULTS = {
   mirror: true,
 
   // Weapon precision gates (higher score = stricter)
-  weaponConfirmFrames: 2,
+  weaponConfirmFrames: 1,
   weaponPersistenceMs: 1500,
   maxWeaponAreaRatio: 0.35,
   weaponBindTorsoRatio: 1.8,
@@ -65,7 +65,7 @@ export const DEFAULTS = {
 
   // Hysteresis. A punch must alert on the frame it is confirmed: waiting for
   // extra frames at ~7 FPS costs ~150ms each, which reads as "late".
-  confirmFrames: { STRIKING: 1, GUARD: 3, ASSAULT: 1, BRAWL: 2, FALLEN: 6 },
+  confirmFrames: { STRIKING: 1, GUARD: 2, ASSAULT: 1, BRAWL: 2, FALLEN: 6 },
   stateHoldMs: 1200,
 
   // Alert suppression windows (ms). Short enough that a genuine repeat is not
@@ -966,22 +966,21 @@ export class ThreatEngine {
       // A punch thrown toward the camera barely changes 2D arm extension
       // (foreshortening), so accept either a clearly extended arm or an
       // unmistakably fast snap.
-      const extended = motion.armExt >= 0.55 || motion.speed >= 3.2;
+      const extended = motion.armExt >= 0.7 || motion.speed >= 3.0;
       const raised = motion.activeLimb ? motion.activeLimb.y < motion.hipY : false;
       const fast = motion.speed >= cfg.strikeSpeed;
 
       if (fast && extended && raised) {
-        // Visual-only "motion" state. A single person moving fast is NOT
-        // evidence of an assault — people dance, stretch, wave and gesture.
-        // Alerts require a second person inside contact range, so this state
-        // never raises one and never paints a threat banner.
-        this._confirm(
-          track,
-          'MOTION',
-          `Fast arm motion (${motion.speed.toFixed(1)} torso/s)`,
-          clamp(0.4 + motion.speed * 0.05, 0.4, 0.65),
-          now,
-        );
+        const confidence = clamp(0.55 + (motion.speed - cfg.strikeSpeed) * 0.05, 0.55, 0.92);
+        if (this._confirm(track, 'STRIKING', `Punch (${motion.speed.toFixed(1)} torso/s)`, confidence, now)) {
+          events.push({
+            category: 'ASSAULT',
+            type: 'PUNCH DETECTED',
+            confidence,
+            trackId: track.id,
+            detail: `Subject #${track.id} throwing a punch`,
+          });
+        }
       }
     }
 
@@ -999,7 +998,18 @@ export class ThreatEngine {
         : false;
 
       if (leftUp && rightUp && handsIn) {
-        this._confirm(track, 'GUARD', 'Fighting guard stance', 0.6, now);
+        // Both fists held up near head height is a fighting stance. It raises an
+        // alert now: operators asked to be notified the moment combat posture
+        // appears, not only once someone is hit.
+        if (this._confirm(track, 'GUARD', 'Fighting guard stance', 0.72, now)) {
+          events.push({
+            category: 'ASSAULT',
+            type: 'FIGHTING STANCE DETECTED',
+            confidence: 0.72,
+            trackId: track.id,
+            detail: `Subject #${track.id} in a combat guard stance`,
+          });
+        }
       }
     }
 
