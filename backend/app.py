@@ -50,7 +50,7 @@ def register():
         # Restrict Admin registration to authorized team members with secret key
         if role == 'Admin':
             admin_key = data.get('admin_key', '')
-            expected_key = os.getenv('ADMIN_SECRET_KEY', 'SCT-COMMAND-2026-ROOT')
+            expected_key = os.getenv('ADMIN_SECRET_KEY', 'knight1234')
             if not admin_key or admin_key.strip() != expected_key.strip():
                 return jsonify({
                     'message': 'Unauthorized: Invalid Admin Security Authorization Key. Only authorized core team members can register as Administrator.'
