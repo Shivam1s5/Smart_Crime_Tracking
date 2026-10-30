@@ -64,14 +64,15 @@ export const DEFAULTS = {
   confirmFrames: { STRIKING: 2, GUARD: 3, ASSAULT: 2, BRAWL: 2, FALLEN: 6 },
   stateHoldMs: 1200,
 
-  // Alert suppression windows (ms)
+  // Alert suppression windows (ms). Short enough that a genuine repeat is not
+  // held back for the better part of a minute.
   alertCooldowns: {
-    WEAPON: 20000,
-    ASSAULT: 15000,
-    BRAWL: 18000,
-    CROWD: 45000,
-    NOISE: 40000,
-    FALLEN: 30000,
+    WEAPON: 15000,
+    ASSAULT: 12000,
+    BRAWL: 15000,
+    CROWD: 25000,
+    NOISE: 25000,
+    FALLEN: 20000,
   },
 
   noiseSustainMs: 1500,
@@ -346,8 +347,12 @@ export class ThreatEngine {
     this.lastError = null;
     this.tracker.reset();
     this.weaponMemory.reset();
+    // Each start gets its own loop token: an in-flight frame from a previous
+    // run must not schedule a second render loop (two loops clearing the same
+    // canvas is what made the overlay flicker in and out).
+    this._loopId = (this._loopId || 0) + 1;
     this.onStatus('running');
-    this._schedule();
+    this._schedule(this._loopId);
   }
 
   stop() {
@@ -362,13 +367,15 @@ export class ThreatEngine {
     this.onSnapshot({ tracks: [], weapons: [], gathering: 0, fps: 0, sound: this.soundLevel });
   }
 
-  _schedule() {
+  _schedule(loopId) {
     if (!this.running) return;
-    this.rafId = requestAnimationFrame(() => this._tick());
+    if (loopId !== undefined && loopId !== this._loopId) return;
+    this.rafId = requestAnimationFrame(() => this._tick(loopId));
   }
 
-  async _tick() {
+  async _tick(loopId) {
     if (!this.running) return;
+    if (loopId !== undefined && loopId !== this._loopId) return;
 
     const now = performance.now();
     const minInterval = 1000 / this.config.targetFps;
@@ -391,7 +398,7 @@ export class ThreatEngine {
     this._lastFrameMs = performance.now() - startedAt;
     this._slowFrame = this._lastFrameMs > 260;
 
-    this._schedule();
+    this._schedule(loopId);
   }
 
   async _processFrame(now) {
@@ -579,6 +586,36 @@ export class ThreatEngine {
       events = this._classify(tracks, now);
     } catch (error) {
       this._warn('analysis pipeline', error);
+    }
+
+    // Crowd and noise limits are evaluated outside the analysis try-block: even
+    // if classification fails, a breached limit must still raise an alert.
+    try {
+      if (tracks.length > this.gatheringLimit) {
+        events.push({
+          category: 'CROWD',
+          type: `CROWD LIMIT EXCEEDED (${tracks.length}/${this.gatheringLimit})`,
+          confidence: 0.9,
+          trackId: null,
+          detail: `${tracks.length} people tracked against a limit of ${this.gatheringLimit}`,
+        });
+      }
+
+      if (this.soundLevel > this.soundLimit) {
+        this._noiseSince = this._noiseSince ?? now;
+        if (now - this._noiseSince >= this.config.noiseSustainMs) {
+          events.push({
+            category: 'NOISE',
+            type: 'SUSTAINED HIGH NOISE',
+            confidence: clamp(0.6 + (this.soundLevel - this.soundLimit) / 100, 0.6, 0.9),
+            trackId: null,
+          });
+        }
+      } else {
+        this._noiseSince = null;
+      }
+    } catch (error) {
+      this._warn('threshold alerts', error);
     }
 
     // 6. FPS ---------------------------------------------------------------
@@ -979,33 +1016,8 @@ export class ThreatEngine {
       }
     }
 
-    // --- Crowd + noise thresholds. ----------------------------------------
-    const gathering = tracks.length;
-    if (gathering > this.gatheringLimit) {
-      events.push({
-        category: 'CROWD',
-        type: `CROWD LIMIT EXCEEDED (${gathering}/${this.gatheringLimit})`,
-        confidence: 0.9,
-        trackId: null,
-        detail: `${gathering} people tracked against a limit of ${this.gatheringLimit}`,
-      });
-    }
-
-    if (this.soundLevel > this.soundLimit) {
-      this._noiseSince = this._noiseSince ?? now;
-      if (now - this._noiseSince >= cfg.noiseSustainMs) {
-        const excess = this.soundLevel - this.soundLimit;
-        events.push({
-          category: 'NOISE',
-          type: 'SUSTAINED HIGH NOISE',
-          confidence: clamp(0.6 + excess / 100, 0.6, 0.9),
-          trackId: null,
-          detail: `${Math.round(this.soundLevel)} dB against a limit of ${this.soundLimit} dB`,
-        });
-      }
-    } else {
-      this._noiseSince = null;
-    }
+    // --- Crowd + noise thresholds are handled in _processFrame so a
+    // classification failure can never suppress them. ---------------------
 
     return events;
   }

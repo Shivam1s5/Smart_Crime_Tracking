@@ -1,10 +1,11 @@
 /**
- * Canvas overlay renderer for the surveillance feed.
+ * Canvas overlay renderer.
  *
- * Kept separate from detection so the visuals can be changed or snapshot-tested
- * without touching the pipeline. Every draw call is wrapped so a single bad
- * coordinate can never blank the whole frame (the previous build could throw
- * mid-render and leave the canvas empty).
+ * Rewritten to be defensive: every canvas primitive is guarded, every track is
+ * drawn inside its own try/catch, and no operation can leave the frame blank.
+ * The previous version had a single outer try/catch, so one bad coordinate or
+ * one undefined label erased the entire overlay — which is what made the body
+ * frames appear only intermittently.
  */
 
 const COLORS = {
@@ -18,100 +19,108 @@ const COLORS = {
   FALLEN: '#fb923c',
 };
 
-const FONT_BADGE = 'bold 13px system-ui, -apple-system, Segoe UI, sans-serif';
-const FONT_SMALL = 'bold 11px ui-monospace, SFMono-Regular, Menlo, monospace';
+const HOT_STATES = new Set(['ARMED', 'STRIKING', 'BRAWL']);
 
-const clampNumber = (value, lo, hi) => (value < lo ? lo : value > hi ? hi : value);
-
-const roundRect = (ctx, x, y, w, h, r) => {
-  if (typeof ctx.roundRect === 'function') {
-    ctx.beginPath();
-    ctx.roundRect(x, y, w, h, r);
-    return;
-  }
-  ctx.beginPath();
-  ctx.rect(x, y, w, h);
+/** Coerce anything into a finite number so canvas calls never receive NaN. */
+const num = (value, fallback = 0) => {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
 };
 
-const fillBadge = (ctx, x, y, text, { bg = 'rgba(15, 23, 42, 0.92)', fg = '#f8fafc', border = 'rgba(148, 163, 184, 0.5)' } = {}) => {
-  ctx.save();
-  ctx.font = FONT_BADGE;
-  const width = ctx.measureText(text).width + 18;
-  const height = 24;
-  const left = clampNumber(x, 6, Math.max(6, ctx.canvas.width - width - 6));
-  const top = Math.max(6, y);
+const colorOf = (state) => COLORS[state] || COLORS.NORMAL;
+
+const label = (ctx, text, x, y, options = {}) => {
+  const {
+    bg = 'rgba(15, 23, 42, 0.92)',
+    fg = '#f8fafc',
+    border = 'rgba(148, 163, 184, 0.6)',
+    height = 22,
+  } = options;
+
+  ctx.font = 'bold 12px system-ui, -apple-system, Segoe UI, sans-serif';
+  const width = num(ctx.measureText(text).width, 40) + 16;
+  const left = Math.max(4, Math.min(x, num(ctx.canvas.width) - width - 4));
+  const top = Math.max(4, y);
 
   ctx.fillStyle = bg;
+  ctx.fillRect(left, top, width, height);
   ctx.strokeStyle = border;
-  ctx.lineWidth = 1.2;
-  roundRect(ctx, left, top, width, height, 6);
-  ctx.fill();
-  ctx.stroke();
+  ctx.lineWidth = 1;
+  ctx.strokeRect(left, top, width, height);
 
   ctx.fillStyle = fg;
   ctx.textBaseline = 'middle';
-  ctx.fillText(text, left + 9, top + height / 2 + 1);
-  ctx.restore();
-
-  return { width, height, left, top };
+  ctx.textAlign = 'left';
+  ctx.fillText(text, left + 8, top + height / 2 + 1);
 };
 
-const drawSkeleton = (ctx, track, color, edges) => {
-  const pose = track.pose;
-  if (!pose || !pose.keypoints) return;
+const drawSkeleton = (ctx, keypoints, color) => {
+  if (!Array.isArray(keypoints) || keypoints.length === 0) return;
 
   const points = {};
-  for (const point of pose.keypoints) {
+  for (const point of keypoints) {
     if (point && point.name) points[point.name] = point;
   }
 
-  ctx.save();
+  const edges = [
+    ['left_shoulder', 'right_shoulder'],
+    ['left_shoulder', 'left_elbow'],
+    ['left_elbow', 'left_wrist'],
+    ['right_shoulder', 'right_elbow'],
+    ['right_elbow', 'right_wrist'],
+    ['left_shoulder', 'left_hip'],
+    ['left_hip', 'right_hip'],
+    ['right_shoulder', 'right_hip'],
+    ['left_hip', 'left_knee'],
+    ['left_knee', 'left_ankle'],
+    ['right_hip', 'right_knee'],
+    ['right_knee', 'right_ankle'],
+  ];
+
   ctx.strokeStyle = color;
   ctx.lineWidth = 3;
-  ctx.globalAlpha = 1;
   ctx.lineCap = 'round';
-  ctx.shadowColor = color;
-  ctx.shadowBlur = 6;
 
   for (const [from, to] of edges) {
     const a = points[from];
     const b = points[to];
     if (!a || !b) continue;
-    if ((a.score ?? 0) < 0.2 || (b.score ?? 0) < 0.2) continue;
+    if (num(a.score) < 0.2 || num(b.score) < 0.2) continue;
     ctx.beginPath();
-    ctx.moveTo(a.x, a.y);
-    ctx.lineTo(b.x, b.y);
+    ctx.moveTo(num(a.x), num(a.y));
+    ctx.lineTo(num(b.x), num(b.y));
     ctx.stroke();
   }
 
-  ctx.shadowBlur = 0;
   ctx.fillStyle = color;
-  for (const point of pose.keypoints) {
-    if ((point.score ?? 0) < 0.25) continue;
+  for (const point of keypoints) {
+    if (num(point?.score) < 0.25) continue;
     ctx.beginPath();
-    ctx.arc(point.x, point.y, 4, 0, Math.PI * 2);
+    ctx.arc(num(point.x), num(point.y), 4, 0, Math.PI * 2);
     ctx.fill();
   }
-  ctx.restore();
 };
 
-const drawTrack = (ctx, track, edges) => {
-  const color = COLORS[track.state] || COLORS.NORMAL;
-  const { x1, y1, x2, y2 } = track.bbox;
-  const width = Math.max(1, x2 - x1);
-  const height = Math.max(1, y2 - y1);
-  const hot = track.state === 'ARMED' || track.state === 'STRIKING' || track.state === 'BRAWL';
+const drawTrack = (ctx, track) => {
+  const box = track.bbox || {};
+  const x1 = num(box.x1);
+  const y1 = num(box.y1);
+  const x2 = num(box.x2);
+  const y2 = num(box.y2);
+  const width = Math.max(2, x2 - x1);
+  const height = Math.max(2, y2 - y1);
 
-  ctx.save();
+  const color = colorOf(track.state);
+  const hot = HOT_STATES.has(track.state);
+
+  // Body outline — the permanent frame requested for every person.
   ctx.strokeStyle = color;
-  ctx.lineWidth = hot ? 3 : 2;
-  if (hot) {
-    ctx.shadowColor = color;
-    ctx.shadowBlur = 12;
-  }
+  ctx.lineWidth = hot ? 3 : 2.5;
+  ctx.strokeRect(x1, y1, width, height);
 
-  // Corner brackets — the tactical frame requested for every person.
-  const corner = Math.max(12, Math.min(26, width * 0.18, height * 0.18));
+  // Tactical corner brackets.
+  const corner = Math.max(10, Math.min(26, width * 0.2, height * 0.2));
+  ctx.lineWidth = hot ? 4 : 3;
   const corners = [
     [x1, y1, 1, 1],
     [x2, y1, -1, 1],
@@ -126,69 +135,15 @@ const drawTrack = (ctx, track, edges) => {
     ctx.stroke();
   }
 
-  // Thin body outline.
-  ctx.setLineDash([5, 5]);
-  ctx.lineWidth = 1;
-  ctx.strokeRect(x1, y1, width, height);
-  ctx.setLineDash([]);
-  ctx.restore();
+  if (track.pose && track.pose.keypoints) {
+    drawSkeleton(ctx, track.pose.keypoints, color);
+  }
 
-  drawSkeleton(ctx, track, color, edges);
-
-  // Nameplate above the frame.
-  const label = `#${track.id} · ${track.stateLabel || 'Person'}`;
-  fillBadge(ctx, x1, y1 - 30, label, {
-    bg: hot ? 'rgba(127, 29, 29, 0.94)' : 'rgba(15, 23, 42, 0.92)',
+  const stateText = String(track.stateLabel || 'Person');
+  label(ctx, `#${num(track.id, 0)} · ${stateText}`, x1, y1 - 26, {
+    bg: hot ? 'rgba(127, 29, 29, 0.95)' : 'rgba(15, 23, 42, 0.92)',
     border: color,
   });
-
-  // Motion readout for confirmed movement.
-  if (track.motion && track.motion.speed >= 1.2) {
-    ctx.save();
-    ctx.font = FONT_SMALL;
-    ctx.fillStyle = color;
-    ctx.fillText(`${track.motion.speed.toFixed(1)} torso/s`, x1 + 4, y2 + 14);
-    ctx.restore();
-  }
-};
-
-const drawWeapon = (ctx, weapon) => {
-  const { x1, y1, x2, y2 } = weapon.bbox;
-  ctx.save();
-  ctx.strokeStyle = '#ef4444';
-  ctx.lineWidth = 2.6;
-  ctx.shadowColor = '#ef4444';
-  ctx.shadowBlur = 10;
-  ctx.strokeRect(x1, y1, Math.max(1, x2 - x1), Math.max(1, y2 - y1));
-  ctx.restore();
-
-  const text = `WEAPON: ${weapon.name.toUpperCase()} ${Math.round((weapon.score || 0) * 100)}%`;
-  fillBadge(ctx, x1, y1 - 26, text, { bg: 'rgba(127, 29, 29, 0.95)', border: '#ef4444', fg: '#fee2e2' });
-};
-
-const drawStrikeLine = (ctx, attacker, victim) => {
-  const from = attacker.motion?.activeLimb;
-  const to = victim.motion?.bodyCenter;
-  if (!from || !to) return;
-
-  ctx.save();
-  ctx.strokeStyle = '#ef4444';
-  ctx.lineWidth = 3;
-  ctx.setLineDash([8, 6]);
-  ctx.shadowColor = '#ef4444';
-  ctx.shadowBlur = 10;
-  ctx.beginPath();
-  ctx.moveTo(from.x, from.y);
-  ctx.lineTo(to.x, to.y);
-  ctx.stroke();
-  ctx.setLineDash([]);
-
-  ctx.beginPath();
-  ctx.arc(to.x, to.y, 14, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(239, 68, 68, 0.35)';
-  ctx.fill();
-  ctx.stroke();
-  ctx.restore();
 };
 
 /**
@@ -196,126 +151,104 @@ const drawStrikeLine = (ctx, attacker, victim) => {
  * @param {HTMLCanvasElement} canvas
  * @param {object} scene
  */
-export function drawScene(ctx, canvas, scene) {
-  const {
-    tracks = [],
-    weapons = [],
-    gatheringCount = 0,
-    gatheringLimit = 5,
-    soundLevel = 0,
-    soundLimit = 75,
-    fps = 0,
-    skeletonEdges = [],
-    diag = {},
-  } = scene;
+export function drawScene(ctx, canvas, scene = {}) {
+  if (!ctx || !canvas) return;
 
-  try {
-    for (const track of tracks) drawTrack(ctx, track, skeletonEdges);
-    for (const weapon of weapons) drawWeapon(ctx, weapon);
+  const tracks = Array.isArray(scene.tracks) ? scene.tracks : [];
+  const weapons = Array.isArray(scene.weapons) ? scene.weapons : [];
+  const gatheringCount = num(scene.gatheringCount, tracks.length);
+  const gatheringLimit = num(scene.gatheringLimit, 5);
+  const soundLevel = num(scene.soundLevel, 0);
+  const soundLimit = num(scene.soundLimit, 75);
+  const fps = num(scene.fps, 0);
+  const diag = scene.diag || {};
 
-    for (const track of tracks) {
-      if (track.state !== 'STRIKING' || !track.victimId) continue;
-      const victim = tracks.find((candidate) => candidate.id === track.victimId);
-      if (victim) drawStrikeLine(ctx, track, victim);
+  const width = num(canvas.width);
+  const height = num(canvas.height);
+
+  let drawn = 0;
+
+  for (const track of tracks) {
+    try {
+      drawTrack(ctx, track);
+      drawn += 1;
+    } catch (error) {
+      // One malformed track must never erase the others.
+      console.warn('[overlay] track render skipped:', error?.message || error);
     }
+  }
 
-    // Top threat banner.
-    const hot = tracks.filter(
-      (track) => track.state === 'ARMED' || track.state === 'STRIKING' || track.state === 'BRAWL',
-    );
-    if (hot.length > 0) {
-      const primary = hot[0];
-      const text = `THREAT: ${primary.stateLabel.toUpperCase()} · SUBJECT #${primary.id}`;
-      ctx.save();
-      ctx.font = FONT_BADGE;
-      const width = ctx.measureText(text).width + 26;
-      const x = Math.max(8, (canvas.width - width) / 2);
-      ctx.fillStyle = 'rgba(153, 27, 27, 0.95)';
+  for (const weapon of weapons) {
+    try {
+      const b = weapon.bbox || {};
       ctx.strokeStyle = '#ef4444';
-      ctx.lineWidth = 2;
-      roundRect(ctx, x, 10, width, 28, 6);
-      ctx.fill();
-      ctx.stroke();
-      ctx.fillStyle = '#fff';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(text, x + 13, 25);
-      ctx.restore();
+      ctx.lineWidth = 3;
+      ctx.strokeRect(num(b.x1), num(b.y1), Math.max(2, num(b.x2) - num(b.x1)), Math.max(2, num(b.y2) - num(b.y1)));
+      label(ctx, `WEAPON ${String(weapon.name || '').toUpperCase()} ${Math.round(num(weapon.score) * 100)}%`, num(b.x1), num(b.y1) - 24, {
+        bg: 'rgba(127, 29, 29, 0.95)',
+        border: '#ef4444',
+        fg: '#fee2e2',
+      });
+    } catch (error) {
+      console.warn('[overlay] weapon render skipped:', error?.message || error);
     }
+  }
 
-    // Telemetry strip.
-    ctx.save();
-    ctx.font = FONT_SMALL;
-    ctx.textBaseline = 'top';
-
+  // --- HUD ---------------------------------------------------------------
+  try {
     const crowded = gatheringCount > gatheringLimit;
-    const noise = soundLevel > soundLimit;
+    label(ctx, `PEOPLE ${gatheringCount}/${gatheringLimit}`, 10, 10, {
+      bg: crowded ? 'rgba(153, 27, 27, 0.92)' : 'rgba(15, 23, 42, 0.88)',
+      border: crowded ? '#ef4444' : 'rgba(34, 211, 238, 0.6)',
+      fg: crowded ? '#fecaca' : '#67e8f9',
+    });
 
-    const left = `PEOPLE ${gatheringCount}/${gatheringLimit}`;
-    ctx.fillStyle = crowded ? 'rgba(153, 27, 27, 0.9)' : 'rgba(15, 23, 42, 0.85)';
-    ctx.strokeStyle = crowded ? '#ef4444' : 'rgba(34, 211, 238, 0.5)';
-    roundRect(ctx, 10, 10, ctx.measureText(left).width + 16, 22, 4);
-    ctx.fill();
-    ctx.stroke();
-    ctx.fillStyle = crowded ? '#fecaca' : '#67e8f9';
-    ctx.fillText(left, 18, 16);
+    const noisy = soundLevel > soundLimit;
+    ctx.font = 'bold 12px system-ui, sans-serif';
+    const noiseText = `NOISE ${Math.round(soundLevel)}/${Math.round(soundLimit)} dB`;
+    const noiseWidth = num(ctx.measureText(noiseText).width, 80) + 16;
+    label(ctx, noiseText, width - noiseWidth - 10, 10, {
+      bg: noisy ? 'rgba(124, 45, 18, 0.92)' : 'rgba(15, 23, 42, 0.88)',
+      border: noisy ? '#fb923c' : 'rgba(234, 179, 8, 0.6)',
+      fg: noisy ? '#fed7aa' : '#fde68a',
+    });
+  } catch (error) {
+    console.warn('[overlay] hud render skipped:', error?.message || error);
+  }
 
-    const right = `NOISE ${Math.round(soundLevel)}/${soundLimit} dB`;
-    const rightWidth = ctx.measureText(right).width + 16;
-    ctx.fillStyle = noise ? 'rgba(124, 45, 18, 0.9)' : 'rgba(15, 23, 42, 0.85)';
-    ctx.strokeStyle = noise ? '#fb923c' : 'rgba(234, 179, 8, 0.5)';
-    roundRect(ctx, canvas.width - rightWidth - 10, 10, rightWidth, 22, 4);
-    ctx.fill();
-    ctx.stroke();
-    ctx.fillStyle = noise ? '#fed7aa' : '#fde68a';
-    ctx.fillText(right, canvas.width - rightWidth - 2, 16);
-    ctx.restore();
+  // --- Liveness heartbeat ------------------------------------------------
+  try {
+    const persons = num(diag.persons, gatheringCount);
+    const maxSpeed = num(diag.maxSpeed, 0);
+    const heartbeat = `AI LIVE  ${fps.toFixed(1)} FPS  ${persons} TRACKED  ${drawn}/${tracks.length} DRAWN  MAX ${maxSpeed.toFixed(1)}`;
 
-    // Liveness heartbeat. This is drawn on every frame, even with nobody in
-    // view, so "engine running but nothing on screen" can never be ambiguous
-    // again: if this chip is visible the render path works.
-    ctx.save();
-    ctx.font = FONT_SMALL;
-    ctx.textBaseline = 'top';
-    const persons = diag.persons ?? gatheringCount;
-    const maxSpeed = diag.maxSpeed ?? 0;
-    const heartbeat = `AI LIVE · ${fps.toFixed(1)} FPS · ${persons} TRACKED · MAX ${maxSpeed.toFixed(1)} t/s`;
-    ctx.fillStyle = 'rgba(15, 23, 42, 0.88)';
-    ctx.strokeStyle = 'rgba(34, 211, 238, 0.65)';
-    ctx.lineWidth = 1.2;
-    roundRect(ctx, 10, canvas.height - 50, ctx.measureText(heartbeat).width + 18, 22, 4);
-    ctx.fill();
-    ctx.stroke();
-    ctx.fillStyle = '#67e8f9';
-    ctx.fillText(heartbeat, 18, canvas.height - 44);
+    label(ctx, heartbeat, 10, height - 52, {
+      bg: 'rgba(15, 23, 42, 0.92)',
+      border: 'rgba(34, 211, 238, 0.7)',
+      fg: '#67e8f9',
+    });
 
     if (diag.error) {
-      const message = String(diag.error).slice(0, 120);
-      const errorText = `ENGINE ERROR · ${message}`;
-      ctx.fillStyle = 'rgba(127, 29, 29, 0.94)';
-      ctx.strokeStyle = '#ef4444';
-      roundRect(ctx, 10, canvas.height - 76, ctx.measureText(errorText).width + 18, 22, 4);
-      ctx.fill();
-      ctx.stroke();
-      ctx.fillStyle = '#fecaca';
-      ctx.fillText(errorText, 18, canvas.height - 70);
+      label(ctx, `ENGINE ERROR: ${String(diag.error).slice(0, 90)}`, 10, height - 78, {
+        bg: 'rgba(127, 29, 29, 0.95)',
+        border: '#ef4444',
+        fg: '#fecaca',
+      });
     }
-    ctx.restore();
-
-    // Forensic footer: timestamp + engine state.
-    ctx.save();
-    ctx.font = FONT_SMALL;
-    ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
-    ctx.fillRect(0, canvas.height - 22, canvas.width, 22);
-    ctx.fillStyle = 'rgba(203, 213, 225, 0.9)';
-    const stamp = new Date().toLocaleString();
-    ctx.fillText(
-      `POLICE AI SURVEILLANCE · ${fps.toFixed(1)} FPS · ${stamp}`,
-      10,
-      canvas.height - 15,
-    );
-    ctx.restore();
   } catch (error) {
-    // Never let a rendering bug kill the detection loop.
-    console.error('Overlay render error:', error);
+    console.warn('[overlay] heartbeat render skipped:', error?.message || error);
+  }
+
+  // --- Footer ------------------------------------------------------------
+  try {
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
+    ctx.fillRect(0, height - 22, width, 22);
+    ctx.fillStyle = 'rgba(203, 213, 225, 0.9)';
+    ctx.font = 'bold 11px ui-monospace, monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`POLICE AI SURVEILLANCE  ${new Date().toLocaleString()}`, 10, height - 11);
+  } catch {
+    /* footer is cosmetic */
   }
 }

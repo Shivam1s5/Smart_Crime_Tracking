@@ -1179,7 +1179,7 @@ export default function PoliceDashboard() {
                       }}>
                         <Users size={12} color={(liveGatheringCounts[cam.camera_id] || 0) > (cam.gathering_threshold || 5) ? '#fff' : '#38bdf8'} />
                         <span>
-                          Gathering: {liveGatheringCounts[cam.camera_id] !== undefined ? liveGatheringCounts[cam.camera_id] : '—'} / Limit: {cam.gathering_threshold || 5}
+                          Gathering: {liveGatheringCounts[cam.camera_id] ?? 0} / Limit: {cam.gathering_threshold || 5}
                         </span>
                       </div>
 
