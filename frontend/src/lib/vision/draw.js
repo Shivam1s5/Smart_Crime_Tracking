@@ -67,26 +67,29 @@ const drawSkeleton = (ctx, track, color, edges) => {
 
   ctx.save();
   ctx.strokeStyle = color;
-  ctx.lineWidth = 2.4;
-  ctx.globalAlpha = 0.9;
+  ctx.lineWidth = 3;
+  ctx.globalAlpha = 1;
   ctx.lineCap = 'round';
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 6;
 
   for (const [from, to] of edges) {
     const a = points[from];
     const b = points[to];
     if (!a || !b) continue;
-    if ((a.score ?? 0) < 0.25 || (b.score ?? 0) < 0.25) continue;
+    if ((a.score ?? 0) < 0.2 || (b.score ?? 0) < 0.2) continue;
     ctx.beginPath();
     ctx.moveTo(a.x, a.y);
     ctx.lineTo(b.x, b.y);
     ctx.stroke();
   }
 
+  ctx.shadowBlur = 0;
   ctx.fillStyle = color;
   for (const point of pose.keypoints) {
-    if ((point.score ?? 0) < 0.3) continue;
+    if ((point.score ?? 0) < 0.25) continue;
     ctx.beginPath();
-    ctx.arc(point.x, point.y, 3, 0, Math.PI * 2);
+    ctx.arc(point.x, point.y, 4, 0, Math.PI * 2);
     ctx.fill();
   }
   ctx.restore();

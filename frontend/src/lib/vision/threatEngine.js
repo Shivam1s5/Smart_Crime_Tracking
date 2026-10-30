@@ -37,14 +37,14 @@ import { drawScene } from './draw.js';
 /** Tunable pipeline configuration. All speeds are in torso-lengths / second. */
 export const DEFAULTS = {
   // Detection gates
-  personMinScore: 0.4,
-  poseMinScore: 0.3,
+  personMinScore: 0.35,
+  poseMinScore: 0.2,
   maxPoses: 8,
-  objectMinScore: 0.15,
-  maxObjects: 40,
+  objectMinScore: 0.2,
+  maxObjects: 24,
 
   // Frame pacing
-  targetFps: 15,
+  targetFps: 12,
 
   // Weapon precision gates (higher score = stricter)
   weaponConfirmFrames: 2,
@@ -191,6 +191,8 @@ export class ThreatEngine {
     this._frameHadError = false;
     this._frameCounter = 0;
     this._roiCanvas = null;
+    this._lastFrameMs = 0;
+    this._slowFrame = false;
   }
 
   /**
@@ -376,11 +378,18 @@ export class ThreatEngine {
     }
     this.lastRunAt = now;
 
+    const startedAt = performance.now();
     try {
       await this._processFrame(now);
     } catch (error) {
       this.onError(error);
     }
+
+    // Track frame cost so expensive extras (the zoomed weapon pass) can be
+    // skipped when the machine is already behind, keeping the live overlay
+    // responsive on slower laptops.
+    this._lastFrameMs = performance.now() - startedAt;
+    this._slowFrame = this._lastFrameMs > 260;
 
     this._schedule();
   }
@@ -530,32 +539,47 @@ export class ThreatEngine {
       });
     }
 
-    // 3b. Zoomed weapon scan every third frame (see _scanWeaponRoi).
+    // 3b. Zoomed weapon scan (see _scanWeaponRoi). Guarded and paced: it is an
+    // extra inference pass and must never be able to break the frame.
     this._frameCounter += 1;
-    if (this._frameCounter % 3 === 0) {
-      const zoomed = await this._scanWeaponRoi(video);
-      for (const detection of zoomed) {
-        const duplicate = weaponDetections.some((existing) => iou(existing.bbox, detection.bbox) > 0.4);
-        if (!duplicate) weaponDetections.push(detection);
+    if (this._frameCounter % 4 === 0 && !this._slowFrame) {
+      try {
+        const zoomed = await this._scanWeaponRoi(video);
+        for (const detection of zoomed) {
+          const duplicate = weaponDetections.some((existing) => iou(existing.bbox, detection.bbox) > 0.4);
+          if (!duplicate) weaponDetections.push(detection);
+        }
+      } catch (error) {
+        this._warn('weapon zoom scan', error);
       }
     }
 
-    // 4. Tracking ----------------------------------------------------------
-    const tracks = this.tracker
-      .update(personDetections, now)
-      .filter((track) => track.hits >= 2);
+    // 4. Tracking + analysis.
+    //
+    // This whole stage is isolated: if tracking, pose binding or classification
+    // throws for any reason, the overlay is still rendered below. Previously a
+    // single exception here aborted the frame before drawScene, so the feed
+    // showed a completely blank canvas with no frames and no skeletons.
+    let tracks = [];
+    let weapons = [];
+    let events = [];
 
-    // Re-bind poses after tracking (keeps skeletons attached to the right id).
-    this._attachPoses(tracks, poseEntries);
+    try {
+      tracks = this.tracker.update(personDetections, now).filter((track) => track.hits >= 2);
 
-    const weapons = this.weaponMemory.update(weaponDetections, now);
-    this._bindWeapons(tracks, weapons);
+      // Re-bind poses after tracking (keeps skeletons attached to the right id).
+      this._attachPoses(tracks, poseEntries);
 
-    // 5. Motion + behaviour ------------------------------------------------
-    for (const track of tracks) {
-      this._updateMotion(track, now);
+      weapons = this.weaponMemory.update(weaponDetections, now);
+      this._bindWeapons(tracks, weapons);
+
+      for (const track of tracks) {
+        this._updateMotion(track, now);
+      }
+      events = this._classify(tracks, now);
+    } catch (error) {
+      this._warn('analysis pipeline', error);
     }
-    const events = this._classify(tracks, now);
 
     // 6. FPS ---------------------------------------------------------------
     this._fpsWindowCount += 1;
@@ -625,7 +649,7 @@ export class ThreatEngine {
         if (track.pose) continue;
         const center = boxCenter(track.bbox);
         const gap = distance(center.x, center.y, poseCenter.x, poseCenter.y);
-        const gate = Math.max(48, boxHeight(track.bbox) * 0.6);
+        const gate = Math.max(60, boxHeight(track.bbox) * 0.8);
         if (gap < gate && gap < bestGap) {
           bestGap = gap;
           bestTrack = track;
