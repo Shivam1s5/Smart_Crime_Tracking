@@ -204,6 +204,10 @@ export default function PoliceDashboard() {
     socket.on('red_alert', (data) => {
       setRedAlert(data);
       setAlerts((prev) => [data, ...prev]);
+      if (window.__lastAlertSentAt) {
+        setAlertLatencyMs(Math.round(performance.now() - window.__lastAlertSentAt));
+        window.__lastAlertSentAt = null;
+      }
       // Play a loud alert sound if possible
       try {
         const audio = new Audio('https://www.soundjay.com/buttons/sounds/beep-01a.mp3');
@@ -502,6 +506,7 @@ export default function PoliceDashboard() {
     // The engine already applies an evidence-based per-category cooldown, so the
     // old second timer here (10-50s) only delayed genuine alerts. Fire now.
     window.lastAlertTime = now;
+    window.__lastAlertSentAt = performance.now();
     
     const cam = (camerasRef.current || []).find(c => c.stream_url === 'LOCAL_WEBCAM') || (camerasRef.current || [])[0];
     if (!cam) return;
@@ -527,6 +532,7 @@ export default function PoliceDashboard() {
   const engineRef = useRef(null);
   const [engineStatus, setEngineStatus] = useState('idle');
   const [engineDiag, setEngineDiag] = useState({ fps: 0, persons: 0, maxSpeed: 0, error: null });
+  const [alertLatencyMs, setAlertLatencyMs] = useState(null);
 
   const activeCamera = () =>
     (camerasRef.current || []).find((cam) => cam.stream_url === 'LOCAL_WEBCAM') ||
@@ -537,22 +543,41 @@ export default function PoliceDashboard() {
     if (engineRef.current) return engineRef.current;
 
     engineRef.current = new ThreatEngine({
-      onSnapshot: ({ gathering, fps, maxSpeed, error }) => {
+      onSnapshot: ({ gathering, fps, maxSpeed, error, detectMs, poseMs, detections }) => {
         const cam = activeCamera();
         if (cam) {
           setLiveGatheringCounts((prev) =>
             prev[cam.camera_id] === gathering ? prev : { ...prev, [cam.camera_id]: gathering },
           );
         }
-        setEngineDiag((prev) =>
-          prev.fps === Math.round(fps) && prev.persons === gathering &&
-          prev.maxSpeed === Math.round(maxSpeed * 10) && prev.error === error
-            ? prev
-            : { fps: Math.round(fps), persons: gathering, maxSpeed: Math.round(maxSpeed * 10), error },
-        );
+        setEngineDiag((prev) => {
+          const next = {
+            fps: Math.round(fps),
+            persons: gathering,
+            maxSpeed: Math.round(maxSpeed * 10),
+            error,
+            detectMs: detectMs || 0,
+            poseMs: poseMs || 0,
+            detections: (detections || []).map((d) => `${d.label} ${d.score.toFixed(2)}`).join(' · '),
+          };
+          const sig = [next.fps, next.persons, next.maxSpeed, next.error, next.detectMs, next.poseMs, next.detections].join('|');
+          return prev.sig === sig ? prev : { ...next, sig };
+        });
       },
       onAlert: (event) => {
-        // Confidence comes from the engine's evidence, never a constant.
+        const cam = activeCamera();
+        // Paint the alert locally the instant the engine confirms it instead of
+        // waiting for the server round trip. The server broadcast replaces this
+        // a moment later with the persisted record.
+        setRedAlert({
+          type: event.type,
+          confidence: event.confidence,
+          area: cam?.area || 'Command Station',
+          camera_id: cam?.camera_id || 'CAM-LOCAL',
+          image_url: captureScreenshot(),
+          timestamp: new Date().toISOString(),
+          local: true,
+        });
         triggerRealAlert(event.type, event.confidence);
       },
       onError: (error) => console.error('ThreatEngine frame error:', error),
@@ -1259,10 +1284,18 @@ export default function PoliceDashboard() {
                 </span>
               </div>
 
-              <div style={{ display: 'flex', gap: '14px', flexWrap: 'wrap', fontSize: '0.78rem', marginBottom: '12px', color: 'var(--text-secondary)' }}>
+              <div style={{ display: 'flex', gap: '14px', flexWrap: 'wrap', fontSize: '0.78rem', marginBottom: '8px', color: 'var(--text-secondary)' }}>
                 <span>FPS: <strong style={{ color: '#67e8f9' }}>{engineDiag.fps}</strong></span>
                 <span>Tracked: <strong style={{ color: '#67e8f9' }}>{engineDiag.persons}</strong></span>
                 <span>Peak motion: <strong style={{ color: '#67e8f9' }}>{(engineDiag.maxSpeed / 10).toFixed(1)} torso/s</strong></span>
+                <span>Inference: <strong style={{ color: '#67e8f9' }}>{engineDiag.detectMs || 0} + {engineDiag.poseMs || 0} ms</strong></span>
+                {alertLatencyMs !== null && (
+                  <span>Alert ack: <strong style={{ color: '#67e8f9' }}>{alertLatencyMs} ms</strong></span>
+                )}
+              </div>
+
+              <div style={{ fontSize: '0.72rem', color: '#64748b', marginBottom: '12px', fontFamily: 'ui-monospace, monospace', overflowWrap: 'anywhere' }}>
+                Detector sees: {engineDiag.detections || '—'}
               </div>
 
               {engineDiag.error && (

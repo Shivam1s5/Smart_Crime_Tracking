@@ -30,6 +30,7 @@ import {
   clamp,
   ema,
   padBox,
+  iou,
 } from './geometry.js';
 import { drawScene } from './draw.js';
 
@@ -39,15 +40,16 @@ export const DEFAULTS = {
   personMinScore: 0.4,
   poseMinScore: 0.3,
   maxPoses: 8,
-  objectMinScore: 0.3,
+  objectMinScore: 0.15,
+  maxObjects: 40,
 
   // Frame pacing
-  targetFps: 9,
+  targetFps: 15,
 
   // Weapon precision gates (higher score = stricter)
   weaponConfirmFrames: 2,
-  weaponPersistenceMs: 1200,
-  maxWeaponAreaRatio: 0.18,
+  weaponPersistenceMs: 1500,
+  maxWeaponAreaRatio: 0.35,
   weaponBindTorsoRatio: 1.8,
 
   // Motion analysis. Thresholds are in torso-lengths/second and deliberately
@@ -57,8 +59,9 @@ export const DEFAULTS = {
   contactRatio: 1.15,
   smoothAlpha: 0.5,
 
-  // Hysteresis
-  confirmFrames: { STRIKING: 3, GUARD: 4, ASSAULT: 3, BRAWL: 3, FALLEN: 8 },
+  // Hysteresis. Kept as low as the evidence allows: every extra frame at ~10
+  // FPS costs ~100ms of delay before an operator sees anything.
+  confirmFrames: { STRIKING: 2, GUARD: 3, ASSAULT: 2, BRAWL: 2, FALLEN: 6 },
   stateHoldMs: 1200,
 
   // Alert suppression windows (ms)
@@ -75,16 +78,21 @@ export const DEFAULTS = {
 };
 
 /**
- * COCO classes that can plausibly be a weapon, with the precision gates that
- * make them usable. `minScore` was tuned up sharply from the old 0.05, which
- * fired on any vaguely knife-shaped object in the room.
+ * COCO classes that can plausibly be a weapon, with the gates that keep them
+ * usable.
+ *
+ * These thresholds were far too strict in the previous revision (knife needed
+ * 0.55 and an aspect ratio above 0.2), which meant a knife held in hand — a
+ * tall, thin box — was rejected twice over. COCO-SSD reports real held knives
+ * around 0.3-0.5, so the gates now match reality and precision is recovered
+ * elsewhere: a weapon only raises an alert when it is bound to a nearby person.
  */
 export const WEAPON_CLASS_RULES = {
-  knife: { minScore: 0.55, minAspect: 0.2, maxAspect: 4.5, label: 'Bladed object' },
-  scissors: { minScore: 0.6, minAspect: 0.2, maxAspect: 3, label: 'Bladed object' },
-  fork: { minScore: 0.8, minAspect: 0.2, maxAspect: 3, label: 'Pointed object' },
-  'baseball bat': { minScore: 0.55, minAspect: 1.8, maxAspect: 12, label: 'Blunt weapon' },
-  bottle: { minScore: 0.85, minAspect: 1.2, maxAspect: 6, label: 'Blunt object' },
+  knife: { minScore: 0.3, minAspect: 0.04, maxAspect: 8, label: 'Bladed object' },
+  scissors: { minScore: 0.3, minAspect: 0.05, maxAspect: 5, label: 'Bladed object' },
+  fork: { minScore: 0.45, minAspect: 0.05, maxAspect: 4, label: 'Pointed object' },
+  'baseball bat': { minScore: 0.3, minAspect: 1.2, maxAspect: 14, label: 'Blunt weapon' },
+  bottle: { minScore: 0.6, minAspect: 0.7, maxAspect: 8, label: 'Blunt object' },
 };
 
 const SKELETON_EDGES = [
@@ -181,6 +189,94 @@ export class ThreatEngine {
     this.getCanvas = null;
     this.lastError = null;
     this._frameHadError = false;
+    this._frameCounter = 0;
+    this._roiCanvas = null;
+  }
+
+  /**
+   * COCO-SSD internally rescales its input to ~300px, so a knife held in a
+   * person's hand occupies a handful of pixels and is never detected. Running a
+   * second pass on a crop around the people already on screen multiplies the
+   * effective resolution of exactly the region where a weapon would be.
+   */
+  async _scanWeaponRoi(video) {
+    if (!this.models) return [];
+
+    const roi = this._weaponRoi(video.videoWidth, video.videoHeight);
+    if (!roi) return [];
+
+    if (!this._roiCanvas) this._roiCanvas = document.createElement('canvas');
+    const roiCanvas = this._roiCanvas;
+    const size = 512;
+    roiCanvas.width = size;
+    roiCanvas.height = size;
+
+    const roiCtx = roiCanvas.getContext('2d');
+    if (!roiCtx) return [];
+    roiCtx.drawImage(video, roi.x, roi.y, roi.w, roi.h, 0, 0, size, size);
+
+    let predictions = [];
+    try {
+      predictions = (await this.models.objectModel.detect(roiCanvas, 20, 0.12)) || [];
+    } catch {
+      return [];
+    }
+
+    const scaleX = roi.w / size;
+    const scaleY = roi.h / size;
+    const found = [];
+
+    for (const prediction of predictions) {
+      const rule = WEAPON_CLASS_RULES[prediction.class];
+      if (!rule) continue;
+      if ((prediction.score ?? 0) < rule.minScore * 0.9) continue;
+
+      const [bx, by, bw, bh] = prediction.bbox;
+      if (bw < 4 || bh < 4) continue;
+
+      const bbox = {
+        x1: roi.x + bx * scaleX,
+        y1: roi.y + by * scaleY,
+        x2: roi.x + (bx + bw) * scaleX,
+        y2: roi.y + (by + bh) * scaleY,
+      };
+
+      const aspect = (bbox.x2 - bbox.x1) / Math.max(1, bbox.y2 - bbox.y1);
+      if (aspect < rule.minAspect || aspect > rule.maxAspect) continue;
+
+      found.push({ name: prediction.class, label: rule.label, bbox, score: prediction.score, zoom: true });
+    }
+
+    return found;
+  }
+
+  /** Region of interest = union of the people currently being tracked. */
+  _weaponRoi(videoWidth, videoHeight) {
+    const now = performance.now();
+    const tracks = (this.tracker.tracks || []).filter((track) => now - track.lastSeen <= 900);
+    if (tracks.length === 0) return null;
+
+    let x1 = Infinity;
+    let y1 = Infinity;
+    let x2 = -Infinity;
+    let y2 = -Infinity;
+    for (const track of tracks) {
+      x1 = Math.min(x1, track.bbox.x1);
+      y1 = Math.min(y1, track.bbox.y1);
+      x2 = Math.max(x2, track.bbox.x2);
+      y2 = Math.max(y2, track.bbox.y2);
+    }
+    if (!Number.isFinite(x1) || x2 <= x1 || y2 <= y1) return null;
+
+    const padX = (x2 - x1) * 0.15;
+    const padY = (y2 - y1) * 0.15;
+    const rx = Math.max(0, x1 - padX);
+    const ry = Math.max(0, y1 - padY);
+    const rw = Math.min(videoWidth - rx, x2 - x1 + padX * 2);
+    const rh = Math.min(videoHeight - ry, y2 - y1 + padY * 2);
+
+    if (rw < 40 || rh < 40) return null;
+    return { x: rx, y: ry, w: rw, h: rh };
   }
 
   _fail(message) {
@@ -335,13 +431,19 @@ export class ThreatEngine {
     // never blank the whole overlay (that was the previous failure mode).
     let objectPredictions = [];
     let poses = [];
+    let detectMs = 0;
+    let poseMs = 0;
 
+    const detectStart = performance.now();
     try {
-      objectPredictions = (await this.models.objectModel.detect(video, 24, this.config.objectMinScore)) || [];
+      objectPredictions =
+        (await this.models.objectModel.detect(video, this.config.maxObjects, this.config.objectMinScore)) || [];
     } catch (error) {
       this._warn('object detector', error);
     }
+    detectMs = performance.now() - detectStart;
 
+    const poseStart = performance.now();
     try {
       poses =
         (await this.models.poseModel.estimatePoses(video, {
@@ -351,6 +453,7 @@ export class ThreatEngine {
     } catch (error) {
       this._warn('pose engine', error);
     }
+    poseMs = performance.now() - poseStart;
 
     const poseEntries = (poses || [])
       .map((pose) => ({ pose, box: boxFromPoints(pose.keypoints, 0.25) }))
@@ -427,6 +530,16 @@ export class ThreatEngine {
       });
     }
 
+    // 3b. Zoomed weapon scan every third frame (see _scanWeaponRoi).
+    this._frameCounter += 1;
+    if (this._frameCounter % 3 === 0) {
+      const zoomed = await this._scanWeaponRoi(video);
+      for (const detection of zoomed) {
+        const duplicate = weaponDetections.some((existing) => iou(existing.bbox, detection.bbox) > 0.4);
+        if (!duplicate) weaponDetections.push(detection);
+      }
+    }
+
     // 4. Tracking ----------------------------------------------------------
     const tracks = this.tracker
       .update(personDetections, now)
@@ -477,6 +590,19 @@ export class ThreatEngine {
       sound: this.soundLevel,
       maxSpeed,
       error: this.lastError,
+      detectMs: Math.round(detectMs),
+      poseMs: Math.round(poseMs),
+      // What the detector actually saw this frame, strongest first. This is the
+      // quickest way to tell "the model never saw the knife" apart from
+      // "the model saw it and a gate rejected it".
+      detections: objectPredictions
+        .slice()
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 5)
+        .map((prediction) => ({
+          label: prediction.class,
+          score: Math.round(prediction.score * 100) / 100,
+        })),
     });
 
     if (!this._frameHadError) this.lastError = null;
