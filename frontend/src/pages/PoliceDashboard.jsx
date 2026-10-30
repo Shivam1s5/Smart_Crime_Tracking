@@ -6,6 +6,50 @@ import { useNavigate } from 'react-router-dom';
 import { ShieldAlert, LogOut, Video, Search, AlertTriangle, AlertOctagon, X, MapPin, Camera, Plus, CheckCircle, Trash2, Pause, Play, Maximize2, Users, SlidersHorizontal, ShieldCheck, Volume2, VolumeX } from 'lucide-react';
 import { ThreatEngine, loadAiModels } from '../lib/vision/threatEngine.js';
 
+const LOCAL_LIMITS_KEY = 'sct.localWebcamLimits';
+
+/**
+ * The laptop webcam is a virtual camera: it exists only in the browser and has
+ * no row in MongoDB. A PUT to /api/cameras/CAM-LAPTOP therefore returns 404,
+ * which surfaced as "Failed to update thresholds". Limits for it are kept in
+ * localStorage instead.
+ */
+const isVirtualCamera = (cam) =>
+  Boolean(cam) &&
+  (cam.stream_url === 'LOCAL_WEBCAM' ||
+    String(cam.camera_id || '').startsWith('CAM-LAPTOP') ||
+    cam.camera_id === 'default_local_cam');
+
+const readLocalLimits = () => {
+  try {
+    return JSON.parse(localStorage.getItem(LOCAL_LIMITS_KEY) || '{}') || {};
+  } catch {
+    return {};
+  }
+};
+
+const writeLocalLimits = (limits) => {
+  try {
+    localStorage.setItem(LOCAL_LIMITS_KEY, JSON.stringify(limits));
+  } catch {
+    /* storage blocked — limits stay session-only */
+  }
+};
+
+const applySavedLimits = (cams) => {
+  const saved = readLocalLimits();
+  if (!saved || (!saved.gathering_threshold && !saved.sound_threshold)) return cams;
+  return cams.map((cam) =>
+    cam.stream_url === 'LOCAL_WEBCAM'
+      ? {
+          ...cam,
+          gathering_threshold: saved.gathering_threshold ?? cam.gathering_threshold,
+          sound_threshold: saved.sound_threshold ?? cam.sound_threshold,
+        }
+      : cam,
+  );
+};
+
 const LocalWebcam = React.forwardRef((props, ref) => {
   const { onAudioLevel } = props;
   const onAudioLevelRef = useRef(onAudioLevel);
@@ -250,11 +294,11 @@ export default function PoliceDashboard() {
           sound_threshold: 75
         }, ...cams];
       }
-      setCameras(cams);
+      setCameras(applySavedLimits(cams));
     } catch (err) {
       console.error(err);
       // Fallback local webcam if backend unreachable
-      setCameras([{
+      setCameras(applySavedLimits([{
         _id: 'default_local_cam',
         camera_id: 'CAM-LAPTOP',
         name: 'Operator Tactical Webcam',
@@ -263,7 +307,7 @@ export default function PoliceDashboard() {
         status: 'Active',
         gathering_threshold: 5,
         sound_threshold: 75
-      }]);
+      }]));
     }
   };
 
@@ -370,21 +414,39 @@ export default function PoliceDashboard() {
     }
   };
 
+  const applyThresholds = (cameraId, gathering_threshold, sound_threshold) => {
+    setCameras((prev) => {
+      const next = prev.map((cam) =>
+        cam.camera_id === cameraId ? { ...cam, gathering_threshold, sound_threshold } : cam,
+      );
+      camerasRef.current = next; // immediate effect on the running AI loop
+      return next;
+    });
+  };
+
   const handleUpdateThreshold = async (e) => {
     e.preventDefault();
     if (!editingCamera) return;
     try {
       const gathering_threshold = Math.max(1, parseInt(editGatheringThresholdValue, 10) || 5);
       const sound_threshold = Math.max(1, parseInt(editSoundThresholdValue, 10) || 75);
+
+      if (isVirtualCamera(editingCamera)) {
+        // No database row exists for the laptop webcam — persist locally.
+        writeLocalLimits({ gathering_threshold, sound_threshold });
+        applyThresholds(editingCamera.camera_id, gathering_threshold, sound_threshold);
+        setShowEditThresholdModal(false);
+        setEditingCamera(null);
+        return;
+      }
+
       await axios.put(`${import.meta.env.VITE_API_URL || 'https://smart-crime-tracking.onrender.com'}/api/cameras/${editingCamera.camera_id}`, {
         gathering_threshold,
         sound_threshold
       }, {
         headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
       });
-      const updated = cameras.map(c => c.camera_id === editingCamera.camera_id ? { ...c, gathering_threshold, sound_threshold } : c);
-      setCameras(updated);
-      camerasRef.current = updated; // Real-time immediate update for running AI loop
+      applyThresholds(editingCamera.camera_id, gathering_threshold, sound_threshold);
       setShowEditThresholdModal(false);
       setEditingCamera(null);
     } catch (err) {
@@ -411,6 +473,7 @@ export default function PoliceDashboard() {
   };
 
   const handleRestoreLocalWebcam = () => {
+    const saved = readLocalLimits();
     const localCam = {
       _id: 'default_local_cam_' + Date.now(),
       camera_id: 'CAM-LAPTOP',
@@ -418,8 +481,8 @@ export default function PoliceDashboard() {
       area: 'Command Station',
       stream_url: 'LOCAL_WEBCAM',
       status: 'Active',
-      gathering_threshold: 5,
-      sound_threshold: 75
+      gathering_threshold: saved.gathering_threshold || 5,
+      sound_threshold: saved.sound_threshold || 75
     };
     setCameras(prev => {
       const filtered = prev.filter(c => c.stream_url !== 'LOCAL_WEBCAM');
