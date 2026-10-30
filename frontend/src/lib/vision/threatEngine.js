@@ -44,7 +44,11 @@ export const DEFAULTS = {
   maxObjects: 24,
 
   // Frame pacing
-  targetFps: 12,
+  targetFps: 14,
+
+  // Webcam preview is mirrored like a selfie camera: the operator's left hand
+  // appears on the left of the screen. Overlay geometry is flipped to match.
+  mirror: true,
 
   // Weapon precision gates (higher score = stricter)
   weaponConfirmFrames: 2,
@@ -54,14 +58,14 @@ export const DEFAULTS = {
 
   // Motion analysis. Thresholds are in torso-lengths/second and deliberately
   // require another person in contact range before an alert fires.
-  strikeSpeed: 2.2,
-  brawlSpeed: 1.6,
+  strikeSpeed: 1.8,
+  brawlSpeed: 1.4,
   contactRatio: 1.15,
   smoothAlpha: 0.5,
 
-  // Hysteresis. Kept as low as the evidence allows: every extra frame at ~10
-  // FPS costs ~100ms of delay before an operator sees anything.
-  confirmFrames: { STRIKING: 2, GUARD: 3, ASSAULT: 2, BRAWL: 2, FALLEN: 6 },
+  // Hysteresis. A punch must alert on the frame it is confirmed: waiting for
+  // extra frames at ~7 FPS costs ~150ms each, which reads as "late".
+  confirmFrames: { STRIKING: 1, GUARD: 3, ASSAULT: 1, BRAWL: 2, FALLEN: 6 },
   stateHoldMs: 1200,
 
   // Alert suppression windows (ms). Short enough that a genuine repeat is not
@@ -640,6 +644,7 @@ export class ThreatEngine {
       soundLimit: this.soundLimit,
       fps: this.fps,
       skeletonEdges: SKELETON_EDGES,
+      mirror: this.config.mirror !== false,
       diag: { persons: gatheringCount, maxSpeed, error: this.lastError },
     });
 
@@ -658,15 +663,19 @@ export class ThreatEngine {
       // which is what made them intermittently disappear.
       frameWidth: canvas.width,
       frameHeight: canvas.height,
-      boxes: tracks.slice(0, 16).map((track) => ({
-        id: track.id,
-        x1: track.bbox.x1,
-        y1: track.bbox.y1,
-        x2: track.bbox.x2,
-        y2: track.bbox.y2,
-        state: track.state,
-        label: track.stateLabel || 'Person',
-      })),
+      mirror: this.config.mirror !== false,
+      boxes: tracks.slice(0, 16).map((track) => {
+        const mirrored = this.config.mirror !== false;
+        return {
+          id: track.id,
+          x1: mirrored ? canvas.width - track.bbox.x2 : track.bbox.x1,
+          y1: track.bbox.y1,
+          x2: mirrored ? canvas.width - track.bbox.x1 : track.bbox.x2,
+          y2: track.bbox.y2,
+          state: track.state,
+          label: track.stateLabel || 'Person',
+        };
+      }),
       // What the detector actually saw this frame, strongest first. This is the
       // quickest way to tell "the model never saw the knife" apart from
       // "the model saw it and a gate rejected it".

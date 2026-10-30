@@ -8,6 +8,9 @@ import { ThreatEngine, loadAiModels } from '../lib/vision/threatEngine.js';
 
 const LOCAL_LIMITS_KEY = 'sct.localWebcamLimits';
 
+/** Selfie-style preview: the operator's left hand appears on the left. */
+const MIRROR_PREVIEW = true;
+
 /**
  * The laptop webcam is a virtual camera: it exists only in the browser and has
  * no row in MongoDB. A PUT to /api/cameras/CAM-LAPTOP therefore returns 404,
@@ -51,7 +54,7 @@ const applySavedLimits = (cams) => {
 };
 
 const LocalWebcam = React.forwardRef((props, ref) => {
-  const { onAudioLevel } = props;
+  const { onAudioLevel, mirror = true } = props;
   const onAudioLevelRef = useRef(onAudioLevel);
   const audioContextRef = useRef(null);
   const analyserRef = useRef(null);
@@ -144,7 +147,7 @@ const LocalWebcam = React.forwardRef((props, ref) => {
     };
   }, [ref]);
 
-  return <video ref={ref} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', position: 'relative', zIndex: 2 }} />;
+  return <video ref={ref} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', position: 'relative', zIndex: 2, transform: mirror ? 'scaleX(-1)' : 'none' }} />;
 });
 
 export default function PoliceDashboard() {
@@ -501,8 +504,18 @@ export default function PoliceDashboard() {
       snapCanvas.height = h;
       const snapCtx = snapCanvas.getContext('2d');
       
-      // 1. Draw raw live video frame
-      snapCtx.drawImage(video, 0, 0, w, h);
+      // 1. Draw the live frame. The preview is mirrored, so the evidence image
+      // must be mirrored too — otherwise the saved snapshot shows the person
+      // flipped relative to the overlay drawn on top of it.
+      if (MIRROR_PREVIEW) {
+        snapCtx.save();
+        snapCtx.translate(w, 0);
+        snapCtx.scale(-1, 1);
+        snapCtx.drawImage(video, 0, 0, w, h);
+        snapCtx.restore();
+      } else {
+        snapCtx.drawImage(video, 0, 0, w, h);
+      }
       
       // 2. Merge AI Drawing Layer with all bodily frames, skeletons, HUD labels, badges
       const aiCanvas = canvasRef.current;

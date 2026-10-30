@@ -166,11 +166,33 @@ export function drawScene(ctx, canvas, scene = {}) {
   const width = num(canvas.width);
   const height = num(canvas.height);
 
+  // The webcam preview is mirrored (selfie view), so every overlay coordinate
+  // must be flipped around the frame centre to stay on the correct body part.
+  const mirror = Boolean(scene.mirror);
+  const flip = (x) => (mirror ? width - num(x) : num(x));
+
+  const mirrorTrack = (track) => {
+    if (!mirror) return track;
+    const box = track.bbox || {};
+    const pose = track.pose && Array.isArray(track.pose.keypoints)
+      ? {
+          ...track.pose,
+          keypoints: track.pose.keypoints.map((point) => ({ ...point, x: flip(point.x) })),
+        }
+      : track.pose;
+
+    return {
+      ...track,
+      bbox: { x1: flip(box.x2), y1: num(box.y1), x2: flip(box.x1), y2: num(box.y2) },
+      pose,
+    };
+  };
+
   let drawn = 0;
 
   for (const track of tracks) {
     try {
-      drawTrack(ctx, track);
+      drawTrack(ctx, mirrorTrack(track));
       drawn += 1;
     } catch (error) {
       // One malformed track must never erase the others.
@@ -181,10 +203,14 @@ export function drawScene(ctx, canvas, scene = {}) {
   for (const weapon of weapons) {
     try {
       const b = weapon.bbox || {};
+      const x1 = flip(b.x1);
+      const x2 = flip(b.x2);
+      const left = Math.min(x1, x2);
+      const boxWidth = Math.max(2, Math.abs(x2 - x1));
       ctx.strokeStyle = '#ef4444';
       ctx.lineWidth = 3;
-      ctx.strokeRect(num(b.x1), num(b.y1), Math.max(2, num(b.x2) - num(b.x1)), Math.max(2, num(b.y2) - num(b.y1)));
-      label(ctx, `WEAPON ${String(weapon.name || '').toUpperCase()} ${Math.round(num(weapon.score) * 100)}%`, num(b.x1), num(b.y1) - 24, {
+      ctx.strokeRect(left, num(b.y1), boxWidth, Math.max(2, num(b.y2) - num(b.y1)));
+      label(ctx, `WEAPON ${String(weapon.name || '').toUpperCase()} ${Math.round(num(weapon.score) * 100)}%`, left, num(b.y1) - 24, {
         bg: 'rgba(127, 29, 29, 0.95)',
         border: '#ef4444',
         fg: '#fee2e2',
